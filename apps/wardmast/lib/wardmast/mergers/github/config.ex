@@ -65,7 +65,8 @@ defmodule Wardmast.Mergers.Github.Config do
           token: String.t(),
           default_target_branch: String.t(),
           default_reviewers: [String.t()],
-          merge_method: :squash | :merge | :rebase
+          merge_method: :squash | :merge | :rebase,
+          ignore_checks: [String.t()]
         }
 
   @doc """
@@ -153,8 +154,17 @@ defmodule Wardmast.Mergers.Github.Config do
          default_target_branch:
            stringy(Map.get(raw, "default_target_branch")) || @default_target_branch,
          default_reviewers: reviewers(raw),
-         merge_method: merge_method(raw)
+         merge_method: merge_method(raw),
+         ignore_checks: ignore_checks(raw)
        }}
+    end
+  end
+
+  # Check-name prefixes that never judge CI, e.g. an AI reviewer that fails on quota
+  defp ignore_checks(raw) do
+    case Map.get(raw, "ignore_checks") do
+      list when is_list(list) -> Enum.filter(list, &(is_binary(&1) and &1 != ""))
+      _ -> []
     end
   end
 

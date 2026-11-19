@@ -2257,7 +2257,10 @@ defmodule Wardmast.Mergers.Github do
          )
          |> handle_json() do
       {:ok, %{"check_runs" => [_ | _] = runs}} ->
-        runs |> latest_per_check() |> map_check_run_status()
+        case drop_ignored_checks(runs, cfg) do
+          [] -> :not_started
+          kept -> kept |> latest_per_check() |> map_check_run_status()
+        end
 
       {:ok, %{"check_runs" => []}} ->
         :not_started
@@ -2282,6 +2285,7 @@ defmodule Wardmast.Mergers.Github do
       {:ok, %{"check_runs" => runs}} when is_list(runs) ->
         {:ok,
          runs
+         |> drop_ignored_checks(cfg)
          |> latest_per_check()
          |> Enum.filter(&failing_check?/1)
          |> Enum.map(
@@ -2313,6 +2317,16 @@ defmodule Wardmast.Mergers.Github do
   # its shards were cancelled, is dropped, and a cancelled attempt never
   # outranks an attempt that was not cancelled, however much newer its id.
   # With only cancelled attempts left, the cancelled one is what is judged.
+  # merge.config.ignore_checks: advisory checks never make CI red, running or a fix pass
+  defp drop_ignored_checks(runs, %{ignore_checks: [_ | _] = prefixes}) do
+    Enum.reject(runs, fn run ->
+      name = Map.get(run, "name")
+      is_binary(name) and String.starts_with?(name, prefixes)
+    end)
+  end
+
+  defp drop_ignored_checks(runs, _cfg), do: runs
+
   defp latest_per_check(runs) do
     runs = Enum.reject(runs, &cancelled_aggregate?(&1, runs))
 
