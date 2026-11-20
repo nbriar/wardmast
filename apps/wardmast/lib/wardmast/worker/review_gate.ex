@@ -6945,6 +6945,7 @@ defmodule Wardmast.Worker.ReviewGate do
     case Ash.create(Round, attrs) do
       {:ok, _row} ->
         note_conflict_round_outcome(state, role, verdict)
+        post_round_to_pr(state, attrs)
         :ok
 
       {:error, reason} ->
@@ -6961,6 +6962,21 @@ defmodule Wardmast.Worker.ReviewGate do
       )
 
       :error
+  end
+
+  # Local: show the round on the PR (review_gate.post_rounds_to_pr)
+  defp post_round_to_pr(state, attrs) do
+    Wardmast.ReviewGate.PrComment.post(
+      load_workspace(Map.get(state, :workspace_id)),
+      Map.get(state, :repo),
+      Map.get(state, :pr_ref),
+      Map.put(attrs, :sha, Map.get(state, :head_sha))
+    )
+  rescue
+    e ->
+      Logger.warning(
+        "ReviewGate: post_round_to_pr raised for task=#{state.task_id}: #{Exception.message(e)}"
+      )
   end
 
   # Record the reviewer's per-criterion CRITERIA breakdown, and per-finding
