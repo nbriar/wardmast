@@ -391,6 +391,7 @@ defmodule Wardmast.Worker.GitCredentialTest do
       assert_receive {:mint, host_body}
       assert host_body["permissions"]["actions"] == "write"
       assert host_body["permissions"]["workflows"] == "write"
+      assert host_body["permissions"]["checks"] == "read"
 
       assert {:ok, _} = GitCredential.materialize(plan(ws, "tonic"), ws, opts)
       assert_receive {:mint, worker_body}

@@ -524,6 +524,8 @@ defmodule Wardmast.Worker.GitCredential do
   # Still restricted to the one repo, and never held by a worker.
   @host_permissions %{
     "actions" => "write",
+    # The merger and ReviewGate read CI through the check-runs API
+    "checks" => "read",
     "contents" => "write",
     "issues" => "write",
     "metadata" => "read",
