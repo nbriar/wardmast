@@ -1720,6 +1720,7 @@ defmodule Wardmast.Tasks.Issue do
       allow_nil? true
       public? true
       constraints one_of: @shelve_reasons
+
       description "Why it was parked: `:later` (deal with later) or `:discussion` (waiting on discussion)."
     end
 

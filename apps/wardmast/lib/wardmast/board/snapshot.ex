@@ -438,6 +438,12 @@ defmodule Wardmast.Board.Snapshot do
     :attention_owner_cause,
     :attention_note,
     :attention_owner_since,
+    # The board shelf (`shelve/3`): `Wardmast.Tasks.Issue.shelved?/2` reads
+    # these, and a parked Merging ticket leaves the column only if they load.
+    :shelved_at,
+    :shelved_reason,
+    :shelved_note,
+    :shelved_until,
     :description,
     :acceptance,
     :notes,
@@ -543,7 +549,8 @@ defmodule Wardmast.Board.Snapshot do
       idle_ids: idle_ids,
       paused: Keyword.get(opts, :paused, false),
       watchdog_live: Keyword.get_lazy(opts, :watchdog_live, fn -> watchdog_live(issues) end),
-      over_budget: Keyword.get_lazy(opts, :over_budget, fn -> Budget.over_budget_spend(issues) end)
+      over_budget:
+        Keyword.get_lazy(opts, :over_budget, fn -> Budget.over_budget_spend(issues) end)
     }
     |> put_walk_inputs(workspace, issues, opts)
     |> derive()

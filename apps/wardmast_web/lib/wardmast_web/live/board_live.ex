@@ -1573,7 +1573,10 @@ defmodule WardmastWeb.BoardLive do
                 title={alert.detail}
                 class={lane_row_class()}
               >
-                <span aria-hidden="true" class="hero-bell-alert-micro size-3.5 text-[var(--arb-fail-text)]" />
+                <span
+                  aria-hidden="true"
+                  class="hero-bell-alert-micro size-3.5 text-[var(--arb-fail-text)]"
+                />
                 <span class="text-[10px] font-[family-name:var(--font-mono)] text-[var(--text-label)] truncate">
                   {alert_kind_label(alert.kind)}
                 </span>

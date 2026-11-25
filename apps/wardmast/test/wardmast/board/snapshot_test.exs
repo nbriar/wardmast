@@ -1776,7 +1776,11 @@ defmodule Wardmast.Board.SnapshotTest do
         derive(
           issues: [
             parked("bd-p", %{}),
-            issue("bd-m", %{state: :merging, pr_ref: "!8", attention_cause: :awaiting_manual_merge})
+            issue("bd-m", %{
+              state: :merging,
+              pr_ref: "!8",
+              attention_cause: :awaiting_manual_merge
+            })
           ]
         )
 
