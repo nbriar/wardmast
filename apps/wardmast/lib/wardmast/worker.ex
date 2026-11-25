@@ -6240,9 +6240,16 @@ defmodule Wardmast.Worker do
     {provider, model} = respawn_routing(state)
 
     with %{} = port_args <- spawn_args || :no_spawn_args,
-         {:ok, new_args} <- inject_nudge_argv(port_args, nudge, provider),
+         {:ok, new_args, nudge} <- nudge_argv(state, port_args, nudge, provider),
          {:ok, port, scope} <- safe_open_port(new_args, state.task_id) do
       next_attempts = ((meta && Map.get(meta, attempts_key)) || 0) + 1
+
+      # The relaunch may name a different session than the one before it (a
+      # fresh briefed session), so later nudges and resumes must follow it.
+      state =
+        record_preassigned_session(state, agent_adapter_for_provider(provider), new_args, nil)
+
+      meta = state.meta
 
       Logger.info(
         "Worker: #{label} for task=#{state.task_id}; " <>
@@ -6320,7 +6327,103 @@ defmodule Wardmast.Worker do
   # original prompt). If no `--print` slot is present (test fixtures, custom
   # commands) we accept the argv unchanged and rely on the fixture to honor a
   # re-run; the cap then bounds how many times we try.
-  defp inject_nudge_argv(%{argv: argv} = port_args, nudge, provider) when is_list(argv) do
+  # The stashed `:claude_spawn` is the PRISTINE argv. A session-level resume
+  # (bd-1z7624) launched with `--resume <prior sid>` but stashed the dispatch
+  # argv, whose `--session-id <fresh uuid>` never ran; splicing that argv
+  # resumed an id Claude had never seen, and the run died with "No
+  # conversation found". The session that actually ran is the pre-assigned id
+  # in meta, so a Claude nudge resumes that one. When its history is gone, a
+  # fresh session is briefed from the worktree instead of crashing the run.
+  # Returns `{:ok, args, prompt_sent}`.
+  defp nudge_argv(%State{meta: meta} = state, port_args, nudge, provider) do
+    claude? = agent_adapter_for_provider(provider) == Wardmast.Agents.Claude
+    sid = meta && (Map.get(meta, :preassigned_session_id) || Map.get(meta, :session_id))
+
+    cond do
+      not claude? or not is_binary(sid) or sid == "" ->
+        with {:ok, args} <- inject_nudge_argv(port_args, [nudge], provider),
+             do: {:ok, args, nudge}
+
+      nudge_session_present?(meta, sid) ->
+        with {:ok, args} <- inject_nudge_argv(port_args, ["--resume", sid, nudge], provider),
+             do: {:ok, args, nudge}
+
+      true ->
+        Logger.warning(
+          "Worker: session #{sid} for task=#{state.task_id} has no history on disk or in " <>
+            "the run archive; sending the nudge to a fresh briefed session instead"
+        )
+
+        brief = fresh_nudge_brief(state, sid, nudge)
+        insert = ["--session-id", Ecto.UUID.generate(), brief]
+
+        with {:ok, args} <- inject_nudge_argv(port_args, insert, provider),
+             do: {:ok, args, brief}
+    end
+  end
+
+  # A run on a node keeps its session there, out of the primary's sight; it is
+  # assumed present, as before.
+  defp nudge_session_present?(meta, sid) do
+    Map.get(meta, :node_id) != nil or
+      match?(
+        {:ok, _},
+        Wardmast.Usage.ClaudeSessionFile.locate(Map.get(meta, :config_dir), sid)
+      ) or
+      Wardmast.Worker.SessionHistory.available?(sid)
+  end
+
+  # An inline argv element is capped at MAX_ARG_STRLEN (128 KiB).
+  @fresh_brief_max_bytes 100_000
+  @fresh_brief_original_max_bytes 40_000
+
+  defp fresh_nudge_brief(%State{task_id: task_id, run_id: run_id, meta: meta}, sid, nudge) do
+    worktree = Map.get(prepush_view(meta), :worktree_path)
+    target = Map.get(meta, :target_branch) || "main"
+
+    work_so_far =
+      if is_binary(worktree) and File.dir?(worktree),
+        do: Wardmast.Worker.ResumeContext.work_so_far(worktree, target),
+        else: "(the worktree could not be read)\n"
+
+    original =
+      case run_id && Wardmast.Worker.PromptLog.read(run_id) do
+        {:ok, prompt} when prompt != "" ->
+          "## The instructions this task's agent was given (redacted, may be truncated)\n\n" <>
+            truncate_bytes(prompt, @fresh_brief_original_max_bytes)
+
+        _ ->
+          "Read the task with `arb ticket show #{task_id}`.\n"
+      end
+
+    """
+    You are picking up task #{task_id} in a FRESH session. The agent working it
+    printed `arb done`, but its Claude session (#{sid}) can no longer be found,
+    so the message below could not be sent back to it. Its work is in this
+    worktree (your current directory). Do not start over: read the state below
+    and fix what the message reports.
+
+    #{nudge}
+
+    #{work_so_far}
+    #{original}
+    """
+    |> truncate_bytes(@fresh_brief_max_bytes)
+  end
+
+  defp truncate_bytes(text, max) when byte_size(text) <= max, do: text
+
+  defp truncate_bytes(text, max) do
+    valid =
+      case :unicode.characters_to_binary(binary_part(text, 0, max)) do
+        {_incomplete_or_error, valid, _rest} -> valid
+        valid -> valid
+      end
+
+    valid <> "\n...(truncated)\n"
+  end
+
+  defp inject_nudge_argv(%{argv: argv} = port_args, insert, provider) when is_list(argv) do
     adapter = agent_adapter_for_provider(provider)
 
     if Code.ensure_loaded?(adapter) and function_exported?(adapter, :splice_prompt, 2) do
@@ -6334,7 +6437,7 @@ defmodule Wardmast.Worker do
       # compile --warnings-as-errors` then fails on. The dynamic dispatch is
       # the point, not an oversight.
       # credo:disable-for-next-line Credo.Check.Refactor.Apply
-      case apply(adapter, :splice_prompt, [argv, [nudge]]) do
+      case apply(adapter, :splice_prompt, [argv, insert]) do
         {:ok, new_argv} -> {:ok, %{port_args | argv: new_argv}}
         {:error, :no_print_slot} -> {:ok, port_args}
       end
@@ -6349,7 +6452,7 @@ defmodule Wardmast.Worker do
     end
   end
 
-  defp inject_nudge_argv(_port_args, _nudge, _provider), do: {:error, :missing_argv}
+  defp inject_nudge_argv(_port_args, _insert, _provider), do: {:error, :missing_argv}
 
   defp commit_nudge_prompt(%State{task_id: task_id, meta: meta}, :uncommitted) do
     branch = (meta && Map.get(meta, :branch)) || "(your branch)"

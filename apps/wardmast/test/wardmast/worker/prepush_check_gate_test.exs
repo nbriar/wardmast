@@ -931,4 +931,69 @@ defmodule Wardmast.Worker.PrepushCheckGateTest do
       assert [%{name: "format", status: :failed} | _] = steps_of(pid)
     end
   end
+
+  describe "the session a send-back continues" do
+    # A session-level resume launches `--resume <prior sid>` but stashes the
+    # dispatch argv, whose `--session-id` never ran. The fake `claude` logs each
+    # argv it was started with, one block per launch.
+    defp resumed_run(repo, tmp, prior_sid) do
+      ws = workspace(%{"prepush_check" => "echo 'lint: red'; exit 1"})
+      task = new_task(ws)
+      path = committed_worktree(repo, "bd-gate/#{task.id}")
+      log = Path.join(tmp, "argv.log")
+      pid = start_worker(task, repo, path, %{prepush_nudge_cap: 1, resume_session_id: prior_sid})
+
+      script = ~s(printf '%s\\n' "$@" >> #{log}; echo ==== >> #{log}; printf 'arb %s\\n' done)
+
+      {:ok, _port} =
+        Wardmast.Worker.ClaudeSession.start(
+          owner: pid,
+          worktree_path: path,
+          command: ["sh", "-c", script, "sh", "--print", "work", "--session-id", "never-ran"]
+        )
+
+      wait_until(fn -> failed?(pid) end)
+      launches = log |> File.read!() |> String.split("====\n", trim: true)
+      {pid, Enum.map(launches, &String.split(&1, "\n", trim: true))}
+    end
+
+    defp flag(argv, name), do: Enum.at(argv, Enum.find_index(argv, &(&1 == name)) + 1)
+
+    test "resumes the session that ran, not the stashed argv's unused id", %{
+      repo: repo,
+      tmp: tmp
+    } do
+      sid = "prior-#{System.unique_integer([:positive])}"
+      store = Wardmast.Worker.SessionHistory.store_path(sid)
+      File.mkdir_p!(Path.dirname(store))
+      File.write!(store, "{}\n")
+      on_exit(fn -> File.rm(store) end)
+
+      {_pid, [first, nudged]} = resumed_run(repo, tmp, sid)
+
+      assert flag(first, "--resume") == sid
+      assert flag(nudged, "--resume") == sid
+      refute "never-ran" in nudged
+    end
+
+    test "with no history to resume, a fresh session is briefed with the failing output", %{
+      repo: repo,
+      tmp: tmp
+    } do
+      {pid, [_first, nudged]} = resumed_run(repo, tmp, "gone-#{System.unique_integer()}")
+
+      refute "--resume" in nudged
+      fresh = flag(nudged, "--session-id")
+      refute fresh == "never-ran"
+      brief = Enum.join(nudged, "\n")
+      assert brief =~ "FRESH session"
+      assert brief =~ "lint: red"
+
+      # The run went on (and parked on its exhausted cap), and later send-backs
+      # follow the fresh session.
+      meta = Worker.state(pid).meta
+      assert meta.commit_gate_detail == :cap_exhausted
+      assert meta.preassigned_session_id == fresh
+    end
+  end
 end

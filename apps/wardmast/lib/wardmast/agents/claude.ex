@@ -263,7 +263,9 @@ defmodule Wardmast.Agents.Claude do
         {sid, flags} = split_session(tail, tmpfile?)
 
         insert =
-          if sid && "--resume" not in insert, do: ["--resume", sid | insert], else: insert
+          if (sid && "--resume" not in insert) and "--session-id" not in insert,
+            do: ["--resume", sid | insert],
+            else: insert
 
         head = if tmpfile?, do: List.replace_at(head, 2, @inline_prompt_script), else: head
         {:ok, head ++ [print] ++ insert ++ flags}
