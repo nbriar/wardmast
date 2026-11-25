@@ -2032,9 +2032,10 @@ defmodule WardmastWeb.BoardLive do
   attr(:ref, :string, required: true)
   attr(:href, :string, default: nil)
 
-  # The ticket's PR, short (`#6332`), the full ref in its title. It opens the
-  # PR on the forge in a new tab; `stopPropagation` keeps the click from also
-  # running the card's own navigation to the ticket.
+  # The ticket's PR or MR, short (`#6332`, `!77`), the full ref in its title.
+  # It opens `merger_url`, the forge's own page whichever forge recorded it,
+  # in a new tab; `stopPropagation` keeps the click from also running the
+  # card's own navigation to the ticket.
   defp pr_chip(assigns) do
     assigns = assign(assigns, :short, short_pr_ref(assigns.ref))
 
@@ -2066,11 +2067,13 @@ defmodule WardmastWeb.BoardLive do
     ]
   end
 
-  # `owner/repo#6332` reads as `#6332`; a ref with no `#` is shown whole.
+  # The ref is whatever the workspace's merger adapter recorded, so it is not
+  # assumed to be GitHub's: `owner/repo#6332` reads as `#6332` and GitLab's
+  # `group/project!77` as `!77`. Any other shape is shown whole.
   defp short_pr_ref(ref) do
-    case String.split(ref, "#") do
-      [_only] -> ref
-      parts -> "#" <> List.last(parts)
+    case Regex.run(~r/[#!]\d+$/, ref) do
+      [short] -> short
+      nil -> ref
     end
   end
 

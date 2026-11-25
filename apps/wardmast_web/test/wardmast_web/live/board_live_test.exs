@@ -473,6 +473,31 @@ defmodule WardmastWeb.BoardLiveTest do
       assert has_element?(view, ~s([id="card-#{task.id}"] [data-role="pr-link"]), "!77")
     end
 
+    test "a GitLab merge request reads by its own ref and links its own page", %{
+      conn: conn,
+      ws: ws
+    } do
+      task = working_issue(ws, "gitlab MR open")
+
+      {:ok, _} =
+        Ash.update(
+          task,
+          %{
+            pr_ref: "group/project!77",
+            merger_url: "https://gitlab.example.com/group/project/-/merge_requests/77"
+          },
+          action: :record_pr
+        )
+
+      {:ok, view, _html} = live_board(conn)
+
+      assert has_element?(
+               view,
+               ~s([id="card-#{task.id}"] a[data-role="pr-link"][href="https://gitlab.example.com/group/project/-/merge_requests/77"]),
+               "!77"
+             )
+    end
+
     test "a parked worker awaiting an answer points the chip at the worker page", %{
       conn: conn,
       ws: ws
