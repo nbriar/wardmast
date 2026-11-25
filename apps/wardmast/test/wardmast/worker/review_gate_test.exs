@@ -5115,6 +5115,78 @@ defmodule Wardmast.Worker.ReviewGateTest do
                %{commit_gate: :escalated_no_changes_after_non_file_fix}
              ] = impl_rounds
     end
+
+    # Local: the second NO-FILE-CHANGE round rewrote the ticket's pr_body (in
+    # earlyasset, screenshots added to the PR description). That is progress,
+    # not a stall: the next reviewer gets the round instead of a park.
+    test "a second non-file resolution that changed pr_body advances instead of parking",
+         %{repo: repo, ws: ws} do
+      require Ash.Query
+      task = new_task(ws)
+      branch = "feature/rev"
+      :ok = seed_feature_branch(repo, branch)
+
+      # The fix round waits for the test to edit pr_body, as a worker running
+      # `ticket_update_progress` would, before it reports NO-FILE-CHANGE.
+      dir = Path.join(System.tmp_dir!(), "rg-prbody-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(dir)
+      on_exit(fn -> File.rm_rf!(dir) end)
+      wrapper = Path.join(dir, "revise.sh")
+
+      File.write!(wrapper, """
+      #!/bin/sh
+      n=$(cat "#{dir}/count" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "#{dir}/count"
+      until [ -f "#{dir}/go-$n" ]; do sleep 0.05; done
+      exec "#{@revise_non_file_fix}"
+      """)
+
+      File.chmod!(wrapper, 0o755)
+
+      {:ok, pid} =
+        Worker.start(
+          task_id: task.id,
+          repo: "trib/repo",
+          workspace_id: ws.id,
+          meta: %{
+            branch: branch,
+            repo_path: repo,
+            target_branch: "main",
+            merge_title: "Merge #{task.id}",
+            review_required: true,
+            review_rounds: 3,
+            worktree_path: repo,
+            review_command: [@rounds, "REQUEST_CHANGES"],
+            revise_command: [wrapper],
+            review_timeout_ms: 5_000
+          }
+        )
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Worker.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      for n <- 1..2 do
+        wait_until(fn -> File.read(Path.join(dir, "count")) == {:ok, "#{n}\n"} end, 8_000)
+        Ash.update!(Ash.get!(Issue, task.id), %{pr_body: "screenshots, take #{n}"})
+        File.write!(Path.join(dir, "go-#{n}"), "")
+      end
+
+      wait_until(fn -> match?(%{state: :finished}, Worker.state(pid)) end, 10_000)
+
+      refute Ash.get!(Issue, task.id).attention_cause ==
+               :commit_gate_no_changes_after_non_file_fix
+
+      impl_rounds =
+        Wardmast.ReviewGate.Round
+        |> Ash.Query.filter(task_id == ^task.id and role == :impl)
+        |> Ash.Query.sort(inserted_at: :asc)
+        |> Ash.read!()
+
+      assert [
+               %{commit_gate: :advanced_non_file_fix},
+               %{commit_gate: :advanced_non_file_fix}
+             ] = impl_rounds
+    end
   end
 
   # ---- Stage 3: same-mind continuity briefing (bd-1na62i) ------------------

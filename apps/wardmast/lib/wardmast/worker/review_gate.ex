@@ -1225,6 +1225,11 @@ defmodule Wardmast.Worker.ReviewGate do
       # from an idle worker and escalates. Reset to false the moment a round
       # produces a genuine commit (`finish_revise/1`'s `:advanced` branch).
       non_file_fix_used: false,
+      # Local: a digest of the ticket's `pr_body` taken when the current fix round
+      # was launched (`launch_implementer_now/3`). A `NO-FILE-CHANGE:` round that
+      # changed `pr_body` (screenshots added to the PR description, say) did real
+      # work, so it is not the stall `non_file_fix_used` guards against.
+      pr_body_digest: nil,
       # bd-bq8c8a: the sha this round is re-reviewing BECAUSE a third party
       # pushed it, not because an implementer addressed anything
       # (`restart_on_remote_head/3`). nil on every ordinary round. Read only by
@@ -4433,6 +4438,8 @@ defmodule Wardmast.Worker.ReviewGate do
   end
 
   defp launch_implementer_now(state, findings, prompt_prefix) do
+    state = %{state | pr_body_digest: pr_body_digest(state.task_id)}
+
     impl_id = refusal_retry_id(implementer_task_id(state.review_id, impl_round_key(state)), state)
 
     with {:ok, placed} <- place_fix_round(%{state | phase: :revising}),
@@ -5009,6 +5016,14 @@ defmodule Wardmast.Worker.ReviewGate do
         not non_file_fix_declared?(response) ->
           {:escalate_no_changes, :escalated_no_changes}
 
+        state.non_file_fix_used and pr_body_changed?(state) ->
+          Logger.info(
+            "ReviewGate: task=#{state.task_id} round #{state.round} made no commit but " <>
+              "updated pr_body; advancing to the next reviewer"
+          )
+
+          {:advance_non_file_fix, :advanced_non_file_fix}
+
         state.non_file_fix_used ->
           {:escalate_no_changes_after_non_file_fix, :escalated_no_changes_after_non_file_fix}
 
@@ -5021,6 +5036,31 @@ defmodule Wardmast.Worker.ReviewGate do
   # No worktree to inspect — can't tell dirty from clean, so fall back to the
   # pre-bd-2eyf9y behavior (proceed) rather than escalate on a guess.
   defp commit_gate_outcome(_state, _new_sha, _response), do: {:advanced, nil}
+
+  defp pr_body_changed?(%{pr_body_digest: before} = state) when is_binary(before) do
+    case pr_body_digest(state.task_id) do
+      now when is_binary(now) -> now != before
+      _ -> false
+    end
+  end
+
+  defp pr_body_changed?(_state), do: false
+
+  # nil when the ticket cannot be read, so an unreadable ticket never counts as
+  # progress.
+  defp pr_body_digest(task_id) when is_binary(task_id) do
+    case Ash.get(Issue, task_id) do
+      {:ok, %{pr_body: body}} ->
+        :sha256 |> :crypto.hash(body || "") |> Base.encode16(case: :lower)
+
+      _ ->
+        nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  defp pr_body_digest(_task_id), do: nil
 
   # bd-cb7wpq: called only on the `:advance_non_file_fix` outcome, where
   # `commit_gate_outcome/3` has already established HEAD is unchanged and the
