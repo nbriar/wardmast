@@ -296,7 +296,15 @@ defmodule WardmastWeb.TaskDetailLiveTest do
 
       {:ok, _view, html} = live_task(conn, ~p"/tasks/#{task.id}")
 
-      assert (html |> String.split("#100") |> length()) - 1 == 1
+      # The status bar names the open PR too; this is about the Merge section
+      # listing a resumed MR once, not as a prior MR.
+      merge_panel =
+        html
+        |> LazyHTML.from_fragment()
+        |> LazyHTML.query("#panel-merge-review")
+        |> LazyHTML.to_html()
+
+      assert (merge_panel |> String.split("#100") |> length()) - 1 == 1
       refute html =~ "Prior MRs"
     end
   end
