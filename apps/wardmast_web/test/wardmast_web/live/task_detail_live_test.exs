@@ -1771,7 +1771,7 @@ defmodule WardmastWeb.TaskDetailLiveTest do
 
       {:ok, _view, html} = live_task(conn, ~p"/tasks/#{task.id}")
 
-      assert html =~ "CURRENT RUN"
+      assert html =~ ">NOW<"
       assert html =~ "2 runs on this ticket"
     end
 

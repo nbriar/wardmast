@@ -239,10 +239,18 @@ defmodule Wardmast.Tasks.Attention do
   default: asked of `Wardmast.Board.Autopilot`).
   """
   @spec current(Issue.t(), keyword()) :: Lifecycle.Attention.t() | nil
-  def current(%Issue{} = issue, opts \\ []) do
+  def current(%Issue{} = issue, opts \\ []), do: current_view(issue, opts).attention
+
+  @doc """
+  `issue`'s whole lifecycle view (`Wardmast.Tasks.Lifecycle.View.t/0`): its
+  column, computed step and attention, read the way `current/2` reads the
+  attention. Same opts. The ticket page's status row reads its step from here.
+  """
+  @spec current_view(Issue.t(), keyword()) :: Lifecycle.View.t()
+  def current_view(%Issue{} = issue, opts \\ []) do
     workers = Keyword.get_lazy(opts, :workers, &live_workers/0)
     now = Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
-    view(issue, workers, now, resume_queued([issue], opts)).attention
+    view(issue, workers, now, resume_queued([issue], opts))
   end
 
   @typedoc "One open ticket's attention, as the coordinator's queue lists it."

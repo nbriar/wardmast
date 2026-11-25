@@ -1176,7 +1176,7 @@ defmodule WardmastWeb.TaskDetailLive do
     |> assign(:load_state, Map.new([:header | @async_panels], &{&1, :loading}))
     |> assign(:load_tokens, %{})
     |> assign(task: nil, acceptance_items: [], implementer_pin: nil, workspace: nil, worker: nil)
-    |> assign(:attention, nil)
+    |> assign(attention: nil, step: nil)
     |> assign(:pair_session, nil)
     |> assign(runs: [], usage_by_run: %{}, issue_repo: nil, prior_mr_refs: [])
     |> assign(review_rounds: [], review_summary: nil)
@@ -1317,9 +1317,9 @@ defmodule WardmastWeb.TaskDetailLive do
       implementer_pin: implementer_pin(task),
       workspace: fetch_workspace(task),
       worker: fetch_worker(task_id),
-      attention: attention_for(task),
       pair_session: live_pair_session(task_id)
     }
+    |> Map.merge(lifecycle_for(task))
   end
 
   # bd-7p6a9o: the ticket's live pair session, which swaps the Pair button for
@@ -1337,14 +1337,30 @@ defmodule WardmastWeb.TaskDetailLive do
     do: assign(socket, :pair_session, live_pair_session(socket.assigns.task_id))
 
   # bd-8nlez1: the ticket's attention — who has to act on it, and the note a
-  # hand-off or an expired limit left — for the header's attention strip.
-  defp attention_for(%Issue{} = task) do
-    Attention.current(task)
+  # hand-off or an expired limit left — for the Your move card, and its
+  # computed step for the status bar. One `Lifecycle.view/2` read for both.
+  defp lifecycle_for(%Issue{} = task) do
+    view = Attention.current_view(task)
+    %{attention: view.attention, step: view.step}
   rescue
-    _ -> nil
+    _ -> %{attention: nil, step: nil}
   end
 
-  defp attention_for(_task), do: nil
+  defp lifecycle_for(_task), do: %{attention: nil, step: nil}
+
+  # The status bar's step chip: the computed step while In progress or
+  # Merging, the ticket's state otherwise.
+  defp status_step_label(task, step) do
+    WardmastWeb.TicketStatus.step_label(step) || state_step_label(task.state)
+  end
+
+  defp state_step_label(:queued), do: "ready"
+  defp state_step_label(:active), do: "in progress"
+  defp state_step_label(state), do: state |> to_string() |> String.replace("_", " ")
+
+  defp status_step_tone(_worker, %{owner: :operator}), do: :attention
+  defp status_step_tone(nil, _attention), do: :idle
+  defp status_step_tone(_worker, _attention), do: :live
 
   defp panel_data(:runs, ctx), do: runs_data(ctx)
   defp panel_data(:review_rounds, ctx), do: %{review_rounds: fetch_review_rounds(ctx.task_id)}
@@ -1582,7 +1598,7 @@ defmodule WardmastWeb.TaskDetailLive do
   # A run starting or stopping can raise or clear a derived attention item
   # without touching the ticket's row.
   defp refresh_attention(%{assigns: %{load_state: %{header: :ok}, task: task}} = socket),
-    do: assign(socket, :attention, attention_for(task))
+    do: assign(socket, lifecycle_for(task))
 
   defp refresh_attention(socket), do: socket
 
@@ -2569,7 +2585,11 @@ defmodule WardmastWeb.TaskDetailLive do
             >
               <WardmastWeb.CoreComponents.Core.icon name="hero-arrow-left-mini" /> Return to Backlog
             </WardmastWeb.CoreComponents.Core.button>
-            <WardmastWeb.CoreComponents.Core.button size="sm" phx-click="open_edit">
+            <WardmastWeb.CoreComponents.Core.button
+              size="sm"
+              variant="ghost"
+              phx-click="open_edit"
+            >
               <:icon><WardmastWeb.CoreComponents.Core.icon name="hero-pencil-square-mini" /></:icon>
               Edit
             </WardmastWeb.CoreComponents.Core.button>
@@ -2627,7 +2647,11 @@ defmodule WardmastWeb.TaskDetailLive do
             what={@issue_label}
             state={@load_state.header}
           />
-          <div :if={@task} class="flex flex-wrap items-center gap-2 mt-1.5">
+          <div
+            :if={@task}
+            id="task-status-bar"
+            class="flex flex-wrap items-center gap-2 mt-2.5 rounded-[var(--radius-panel)] border border-[var(--border-default)] bg-[var(--surface-panel)] px-2.5 py-2"
+          >
             <.priority_tag
               id="task-priority"
               priority={@task.priority}
@@ -2638,6 +2662,18 @@ defmodule WardmastWeb.TaskDetailLive do
               :if={@priority_schedule}
               schedule={schedule_view(@priority_schedule, @parent_refs)}
             />
+            <WardmastWeb.TicketStatus.step_chip
+              label={status_step_label(@task, @step)}
+              tone={status_step_tone(@worker, @attention)}
+            />
+            <WardmastWeb.TicketStatus.pr_chip
+              pr_ref={@task.pr_ref}
+              url={pr_url(@workspace, @task.pr_ref, @task.repo)}
+              forge={WardmastWeb.TicketStatus.forge(@workspace, @task.repo)}
+            />
+            <WardmastWeb.TicketStatus.attention_chip attention={@attention} />
+          </div>
+          <div :if={@task} class="flex flex-wrap items-center gap-2 mt-1.5">
             <.type_tag type={@task.issue_type} />
             <.difficulty_meter difficulty={@task.difficulty} />
             <span class="text-[11px] font-[family-name:var(--font-mono)] text-[var(--text-label)]">
@@ -2798,14 +2834,78 @@ defmodule WardmastWeb.TaskDetailLive do
                the theory that "which epic am I looking at a piece of" is a
                header question, not a panel one. --%>
           <.parent_links :if={@task} id="task-parents" parents={@parent_refs} class="mt-2" />
-
-          <%!-- bd-8nlez1: the ticket's attention. The coordinator comes first:
-               its items read quietly here, the operator's take the attention
-               hue and carry the hand-back. --%>
-          <.attention_strip :if={@attention} attention={@attention} />
         </div>
 
         <%= if @task do %>
+          <%!-- Above the fold: what the ticket owes you (Your move), what it
+               is doing (Now) and its preview. Everything below is detail and
+               starts collapsed. bd-8nlez1's attention lives in Your move. --%>
+          <div
+            id="task-above-fold"
+            class="grid grid-cols-1 gap-[var(--space-4)] lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)] lg:items-start"
+          >
+            <WardmastWeb.TicketStatus.your_move
+              attention={@attention}
+              pr_ref={@task.pr_ref}
+              pr_url={pr_url(@workspace, @task.pr_ref, @task.repo)}
+              forge={WardmastWeb.TicketStatus.forge(@workspace, @task.repo)}
+              running={not is_nil(@worker)}
+            />
+            <div class="flex flex-col gap-[var(--space-4)] min-w-0">
+              <.panel id="panel-current-run" title="NOW" meta={run_role_breakdown(@runs)}>
+                <div class="flex flex-col gap-3">
+                  <p class="text-[12.5px] text-[var(--text-secondary)]">
+                    {run_count_summary(@runs)}
+                  </p>
+
+                  <div
+                    :if={@worker}
+                    class="flex flex-col gap-2 rounded-[var(--radius-field)] border border-[var(--border-default)] p-2.5"
+                  >
+                    <div class="flex items-center justify-between gap-2">
+                      <span class="text-[11px] font-medium text-[var(--text-label)]">
+                        {String.capitalize(@worker_label)}
+                      </span>
+                      <.status_chip
+                        status={StatusHelpers.run_status(@worker)}
+                        class="badge-sm"
+                      />
+                    </div>
+                    <div class="flex items-center justify-between gap-2 text-[11px] font-[family-name:var(--font-mono)] text-[var(--text-label)]">
+                      <.run_where node_name={RunNode.node_name(@worker)} id="worker-where" />
+                      <span>started {format_started(@worker.started_at)}</span>
+                      <span :if={worker_activity(@worker)}>{worker_activity(@worker)}</span>
+                    </div>
+                    <.link
+                      navigate={~p"/workers/#{@task_id}"}
+                      class="text-[11.5px] text-[var(--arb-info)] hover:underline"
+                    >
+                      view full output →
+                    </.link>
+                  </div>
+
+                  <div
+                    :if={is_nil(@worker)}
+                    class="flex flex-col gap-1 rounded-[var(--radius-field)] border border-dashed border-[var(--border-default)] p-2.5"
+                  >
+                    <p class="text-[12px] text-[var(--text-secondary)]">
+                      No {@worker_label} running for this {@issue_label}.
+                    </p>
+                    <code class="text-[11px] text-[var(--text-label)]">
+                      arb dispatch {@task_id}
+                    </code>
+                  </div>
+                </div>
+              </.panel>
+              <WardmastWeb.PreviewPanel.preview_panel
+                :if={@preview}
+                preview={@preview}
+                busy={@preview_busy}
+                error={@preview_error}
+              />
+            </div>
+          </div>
+
           <div class="flex flex-col gap-[var(--space-4)] lg:grid lg:grid-cols-[minmax(0,1fr)_340px] lg:items-start">
             <%!-- ══ Main column ═════════════════════════════════════════
                  Narrative order top-to-bottom. `contents` below `lg` folds
@@ -2837,16 +2937,10 @@ defmodule WardmastWeb.TaskDetailLive do
                 state={@load_state.refine_session}
                 class="order-3"
               />
-              <WardmastWeb.PreviewPanel.preview_panel
-                :if={@preview}
-                preview={@preview}
-                busy={@preview_busy}
-                error={@preview_error}
-                class="order-3"
-              />
               <.panel
                 :if={present?(@task.description)}
                 id="panel-description"
+                collapsible
                 title="DESCRIPTION"
                 class="order-3"
               >
@@ -2870,6 +2964,8 @@ defmodule WardmastWeb.TaskDetailLive do
               <.panel
                 :if={@acceptance_items != [] or present?(@task.acceptance_waived)}
                 id="panel-acceptance"
+                collapsible
+                open={false}
                 title="ACCEPTANCE"
                 meta={acceptance_meta(@acceptance_items)}
                 class="order-2"
@@ -2918,6 +3014,8 @@ defmodule WardmastWeb.TaskDetailLive do
               <.panel
                 :if={@refine_session}
                 id="panel-refine-session"
+                collapsible
+                open={false}
                 title="REFINEMENT SESSION"
                 class="order-7"
               >
@@ -2955,6 +3053,8 @@ defmodule WardmastWeb.TaskDetailLive do
               <.panel
                 :if={Wardmast.Tasks.Issue.findings_type?(@task.issue_type)}
                 id="panel-findings"
+                collapsible
+                open={false}
                 title="FINDINGS"
                 class="order-7"
               >
@@ -2967,6 +3067,8 @@ defmodule WardmastWeb.TaskDetailLive do
               <.panel
                 :if={!Wardmast.Tasks.Issue.findings_type?(@task.issue_type) and present?(@task.notes)}
                 id="panel-notes"
+                collapsible
+                open={false}
                 title="NOTES"
                 class="order-7"
               >
@@ -2984,6 +3086,8 @@ defmodule WardmastWeb.TaskDetailLive do
                     present?(@task.pr_body) or @prior_mr_refs != [] or @review_summary != nil
                 }
                 id="panel-merge-review"
+                collapsible
+                open={false}
                 title="MERGE & REVIEW"
                 class="order-4"
               >
@@ -3106,6 +3210,8 @@ defmodule WardmastWeb.TaskDetailLive do
               <.panel
                 :if={present?(@task.qa_notes) or present?(@task.deployment_notes)}
                 id="panel-qa-deployment"
+                collapsible
+                open={false}
                 title="QA & DEPLOYMENT"
                 class="order-8"
               >
@@ -3138,6 +3244,8 @@ defmodule WardmastWeb.TaskDetailLive do
                    full-page permalink. --%>
               <.panel
                 id="panel-runs"
+                collapsible
+                open={false}
                 title="RUNS"
                 meta={if(@load_state.runs == :ok, do: runs_meta(@runs, @usage_by_run))}
                 padded={false}
@@ -3291,6 +3399,8 @@ defmodule WardmastWeb.TaskDetailLive do
                    link opens that page with the same filter applied. --%>
               <.panel
                 id="panel-activity"
+                collapsible
+                open={false}
                 title="ACTIVITY"
                 meta={if(@load_state.versions == :ok, do: activity_meta(@versions, @version_total))}
                 padded={false}
@@ -3337,60 +3447,6 @@ defmodule WardmastWeb.TaskDetailLive do
                    wrapper becomes its own flex column stacking
                    independently of the main column, in source order. --%>
             <div class="contents lg:flex lg:flex-col lg:gap-[var(--space-4)] lg:min-w-0">
-              <%!-- An issue accumulates runs — a main dispatch, review passes,
-                   fix passes — so this block summarises the roster rather
-                   than naming the one worker that happens to be attached. --%>
-              <.panel
-                id="panel-current-run"
-                title="CURRENT RUN"
-                meta={run_role_breakdown(@runs)}
-                class="order-1"
-              >
-                <div class="flex flex-col gap-3">
-                  <p class="text-[12.5px] text-[var(--text-secondary)]">
-                    {run_count_summary(@runs)}
-                  </p>
-
-                  <div
-                    :if={@worker}
-                    class="flex flex-col gap-2 rounded-[var(--radius-field)] border border-[var(--border-default)] p-2.5"
-                  >
-                    <div class="flex items-center justify-between gap-2">
-                      <span class="text-[11px] font-medium text-[var(--text-label)]">
-                        {String.capitalize(@worker_label)}
-                      </span>
-                      <.status_chip
-                        status={StatusHelpers.run_status(@worker)}
-                        class="badge-sm"
-                      />
-                    </div>
-                    <div class="flex items-center justify-between gap-2 text-[11px] font-[family-name:var(--font-mono)] text-[var(--text-label)]">
-                      <.run_where node_name={RunNode.node_name(@worker)} id="worker-where" />
-                      <span>started {format_started(@worker.started_at)}</span>
-                      <span :if={worker_activity(@worker)}>{worker_activity(@worker)}</span>
-                    </div>
-                    <.link
-                      navigate={~p"/workers/#{@task_id}"}
-                      class="text-[11.5px] text-[var(--arb-info)] hover:underline"
-                    >
-                      view full output →
-                    </.link>
-                  </div>
-
-                  <div
-                    :if={is_nil(@worker)}
-                    class="flex flex-col gap-1 rounded-[var(--radius-field)] border border-dashed border-[var(--border-default)] p-2.5"
-                  >
-                    <p class="text-[12px] text-[var(--text-secondary)]">
-                      No {@worker_label} running for this {@issue_label}.
-                    </p>
-                    <code class="text-[11px] text-[var(--text-label)]">
-                      arb dispatch {@task_id}
-                    </code>
-                  </div>
-                </div>
-              </.panel>
-
               <%!-- bd-9so315: a merged-but-unverified task, and the record of
                     what was (or wasn't) observed once someone looked. Rendered
                     only for a task the flag applies to — every other task has
@@ -3398,6 +3454,8 @@ defmodule WardmastWeb.TaskDetailLive do
               <.panel
                 :if={@task.verify_after_deploy}
                 id="panel-verification"
+                collapsible
+                open={false}
                 title="POST-MERGE VERIFICATION"
                 class="order-6"
               >
@@ -3442,6 +3500,8 @@ defmodule WardmastWeb.TaskDetailLive do
                    add/remove-dependency affordance. --%>
               <.panel
                 id="panel-relationships"
+                collapsible
+                open={false}
                 title="RELATIONSHIPS"
                 meta={if(@load_state.deps == :ok, do: relationships_meta(@relationship_groups))}
                 class="order-5"
@@ -3566,6 +3626,7 @@ defmodule WardmastWeb.TaskDetailLive do
               <.panel
                 :if={@children_by_column}
                 id="panel-children-by-column"
+                collapsible
                 title="CHILDREN BY COLUMN"
                 meta={children_by_column_meta(@children_by_column)}
                 class="order-5"
@@ -3615,6 +3676,8 @@ defmodule WardmastWeb.TaskDetailLive do
               <.panel
                 :if={@task.issue_type == :epic}
                 id="panel-epic-floor"
+                collapsible
+                open={false}
                 title="EPIC PRIORITY FLOOR"
                 class="order-5"
               >
@@ -3656,6 +3719,8 @@ defmodule WardmastWeb.TaskDetailLive do
               <.panel
                 :if={@epic_cost_rollup}
                 id="panel-epic-cost-rollup"
+                collapsible
+                open={false}
                 title="COST ROLLUP"
                 class="order-5"
               >
@@ -3712,6 +3777,8 @@ defmodule WardmastWeb.TaskDetailLive do
                    rendered, never written — see `refresh_messages/1`. --%>
               <.panel
                 id="panel-messages"
+                collapsible
+                open={false}
                 title="MESSAGES"
                 meta={if(@load_state.messages == :ok, do: message_panel_meta(@messages))}
                 class="order-10"
@@ -3812,6 +3879,8 @@ defmodule WardmastWeb.TaskDetailLive do
                    child progress now lives in RELATIONSHIPS. --%>
               <.panel
                 id="panel-machine-state"
+                collapsible
+                open={false}
                 title="MACHINE STATE"
                 class="order-11"
               >
@@ -3857,6 +3926,8 @@ defmodule WardmastWeb.TaskDetailLive do
                    dispatch of this issue would carry right now. --%>
               <.panel
                 id="panel-skills"
+                collapsible
+                open={false}
                 title="SKILLS"
                 meta={if(@load_state.skills == :ok, do: "#{length(@skills)} active")}
                 class="order-13"
@@ -4636,70 +4707,6 @@ defmodule WardmastWeb.TaskDetailLive do
     </div>
     """
   end
-
-  # bd-8nlez1: the ticket's attention (`Wardmast.Tasks.Attention.current/1`) —
-  # who has to act, why, and the note a hand-off or an expired limit left. An
-  # operator-owned item takes the attention hue and offers the hand-back; a
-  # coordinator-owned one is the coordinator's to work, and reads quietly.
-  attr :attention, :map, required: true
-
-  defp attention_strip(assigns) do
-    ~H"""
-    <div
-      id="task-attention"
-      data-owner={@attention.owner}
-      class={[
-        "mt-3 flex flex-wrap items-start gap-x-3 gap-y-2 rounded-[var(--radius-field)] border-l-[3px] px-3 py-2 text-[12px] transition-colors duration-200",
-        if(@attention.owner == :operator,
-          do:
-            "border-l-[var(--arb-attention)] bg-[var(--arb-attention-wash)] text-[var(--text-title)]",
-          else:
-            "border-l-[var(--border-default)] bg-[var(--surface-sunken)] text-[var(--text-secondary)]"
-        )
-      ]}
-    >
-      <div class="flex min-w-0 flex-1 flex-col gap-0.5">
-        <div class="flex items-center gap-1.5">
-          <.icon
-            name={if(@attention.owner == :operator, do: "hero-hand-raised", else: "hero-cpu-chip")}
-            class={[
-              "size-3.5 shrink-0",
-              @attention.owner == :operator && "text-[var(--arb-attention)]"
-            ]}
-          />
-          <span id="task-attention-owner" class="font-medium">
-            {attention_owner_label(@attention.owner)}
-          </span>
-          <span class="text-[var(--text-label)]">·</span>
-          <span id="task-attention-reason" class="min-w-0 truncate" title={@attention.reason}>
-            {@attention.reason}
-          </span>
-        </div>
-        <p
-          :if={@attention[:note]}
-          id="task-attention-note"
-          class="pl-5 text-[11.5px] italic text-[var(--text-secondary)]"
-        >
-          “{@attention.note}”
-        </p>
-      </div>
-      <button
-        :if={@attention.owner == :operator}
-        id="task-attention-handback"
-        type="button"
-        phx-click="hand_back_attention"
-        phx-disable-with="Handing back…"
-        title="Give this back to the coordinator, with a fresh time limit and resume budget."
-        class="shrink-0 rounded-[var(--radius-chip)] border border-solid border-[var(--arb-attention-edge)] px-2.5 py-1 text-[11.5px] font-medium text-[var(--arb-attention)] transition-colors duration-150 hover:bg-[var(--arb-attention)] hover:text-[var(--arb-attention-ink)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--arb-attention)]"
-      >
-        Hand back to coordinator
-      </button>
-    </div>
-    """
-  end
-
-  defp attention_owner_label(:operator), do: "Needs you"
-  defp attention_owner_label(_), do: "With the coordinator"
 
   # One column of the epic's "Children by column" mini-board (design
   # bd-2s901b §3). Rendered with a plain `<details>` rather than any
