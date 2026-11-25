@@ -101,6 +101,9 @@ defmodule Wardmast.Tasks.Issue do
   @close_reasons Wardmast.Tasks.Lifecycle.close_reasons()
   @attention_causes Wardmast.Tasks.Lifecycle.Attention.causes()
 
+  # Why an operator parked a Merging ticket (`:shelve`).
+  @shelve_reasons ~w(later discussion)a
+
   # bd-9s9dqz: the two no-PR types. Neither provisions a worktree, runs the
   # commit gate or ReviewGate, or enters Merging — a ticket of either goes
   # active → closed (or → verifying) directly. They differ only in the
@@ -1193,6 +1196,72 @@ defmodule Wardmast.Tasks.Issue do
                {:ok, issue}
              end)
     end
+
+    # Parked on the board: the operator set a Merging ticket aside ("deal with
+    # later", "waiting on discussion"). Not a transition and not an attention
+    # cause: the ticket stays `:merging`, its PR stays open and nothing about
+    # the merge changes. The board leaves it out of Merging and Needs
+    # attention and lists it under Parked until it is unshelved, its
+    # `shelved_until` passes, or its state moves on (`Changes.Transition`
+    # clears the shelf). Named "shelve" because "park" already means the
+    # ReviewGate hold (`:park_review`).
+    update :shelve do
+      require_atomic? false
+
+      argument :reason, :atom do
+        allow_nil? false
+        constraints one_of: @shelve_reasons
+      end
+
+      argument :note, :string, allow_nil?: true
+      argument :until, :utc_datetime_usec, allow_nil?: true
+
+      change fn changeset, _context ->
+        if changeset.data.state == :merging do
+          note =
+            case Ash.Changeset.get_argument(changeset, :note) do
+              note when is_binary(note) ->
+                if String.trim(note) == "", do: nil, else: String.trim(note)
+
+              _ ->
+                nil
+            end
+
+          Ash.Changeset.force_change_attributes(changeset, %{
+            shelved_at: DateTime.utc_now(),
+            shelved_reason: Ash.Changeset.get_argument(changeset, :reason),
+            shelved_note: note,
+            shelved_until: Ash.Changeset.get_argument(changeset, :until)
+          })
+        else
+          Ash.Changeset.add_error(changeset,
+            field: :state,
+            message:
+              "Only a Merging ticket can be parked; this one is #{inspect(changeset.data.state)}."
+          )
+        end
+      end
+
+      change after_action(fn _, issue, _ ->
+               Wardmast.Tasks.Issue.broadcast_lifecycle(:updated, issue)
+               {:ok, issue}
+             end)
+    end
+
+    # Back from the shelf: the ticket returns to Merging and, when it has
+    # attention, to Needs attention. A no-op on a ticket that isn't shelved.
+    update :unshelve do
+      require_atomic? false
+
+      change fn changeset, _context ->
+        Ash.Changeset.force_change_attributes(changeset, Wardmast.Tasks.Issue.shelf_cleared())
+      end
+
+      change after_action(fn _, issue, _ ->
+               Wardmast.Tasks.Issue.broadcast_lifecycle(:updated, issue)
+               {:ok, issue}
+             end)
+    end
   end
 
   changes do
@@ -1631,6 +1700,43 @@ defmodule Wardmast.Tasks.Issue do
       When the ticket was last resumed out of a failed run (bd-98gi5m). The
       `run_crashed` attempt limit only counts `attention_resume_attempts`
       while this is within the resume streak window.
+      """
+    end
+
+    # ---- the board shelf (parked Merging tickets) ---------------------------
+
+    attribute :shelved_at, :utc_datetime_usec do
+      allow_nil? true
+      public? true
+
+      description """
+      When the operator parked this Merging ticket (`:shelve`). nil when it is
+      not parked. The board leaves a parked ticket out of Merging and Needs
+      attention; nothing else about the ticket or its PR changes.
+      """
+    end
+
+    attribute :shelved_reason, :atom do
+      allow_nil? true
+      public? true
+      constraints one_of: @shelve_reasons
+
+      description "Why it was parked: `:later` (deal with later) or `:discussion` (waiting on discussion)."
+    end
+
+    attribute :shelved_note, :string do
+      allow_nil? true
+      public? true
+      description "The operator's note on a parked ticket: what or who it is waiting on."
+    end
+
+    attribute :shelved_until, :utc_datetime_usec do
+      allow_nil? true
+      public? true
+
+      description """
+      When a parked ticket comes back on its own. Once it passes the board
+      treats the ticket as not parked. nil: parked until someone unparks it.
       """
     end
 
@@ -2234,6 +2340,31 @@ defmodule Wardmast.Tasks.Issue do
   @doc "Every attention cause (`Wardmast.Tasks.Lifecycle.Attention.causes/0`)."
   @spec attention_causes() :: [atom()]
   def attention_causes, do: @attention_causes
+
+  @doc "Why an operator can park a Merging ticket (`:shelve`)."
+  @spec shelve_reasons() :: [atom()]
+  def shelve_reasons, do: @shelve_reasons
+
+  @doc """
+  Whether the board treats `issue` as parked at `now`: shelved, still
+  `:merging`, and its `shelved_until` (if any) not yet passed.
+  """
+  @spec shelved?(map(), DateTime.t()) :: boolean()
+  def shelved?(issue, now \\ DateTime.utc_now())
+
+  def shelved?(%{shelved_at: %DateTime{}, state: :merging} = issue, now) do
+    case Map.get(issue, :shelved_until) do
+      %DateTime{} = until -> DateTime.compare(until, now) == :gt
+      _ -> true
+    end
+  end
+
+  def shelved?(_issue, _now), do: false
+
+  @doc false
+  # The shelf's attributes, all nil: what `:unshelve` and a state move write.
+  def shelf_cleared,
+    do: %{shelved_at: nil, shelved_reason: nil, shelved_note: nil, shelved_until: nil}
 
   @doc "List of valid issue_type atoms."
   def issue_types, do: Wardmast.Extensions.atoms(:issue_type)

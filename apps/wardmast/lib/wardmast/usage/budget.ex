@@ -410,11 +410,21 @@ defmodule Wardmast.Usage.Budget do
 
   @spec over_budget_ids([Issue.t() | map()], keyword()) :: [String.t()]
   def over_budget_ids(issues, opts \\ []) when is_list(issues) do
+    issues |> over_budget_spend(opts) |> Map.keys()
+  end
+
+  @doc """
+  `over_budget_ids/2` with each id's worker spend so far, in USD: what the
+  board's quiet over-budget marker shows on the card. Same reads, same
+  best-effort rule.
+  """
+  @spec over_budget_spend([Issue.t() | map()], keyword()) :: %{String.t() => float()}
+  def over_budget_spend(issues, opts \\ []) when is_list(issues) do
     open = Enum.filter(issues, &open?/1)
 
     case open do
       [] ->
-        []
+        %{}
 
       open ->
         sample = Keyword.get_lazy(opts, :sample, fn -> Estimate.sample(opts) end)
@@ -422,18 +432,20 @@ defmodule Wardmast.Usage.Budget do
         opts = Keyword.put(opts, :sample, sample)
 
         open
-        |> Enum.filter(fn issue ->
+        |> Enum.flat_map(fn issue ->
           spend = Map.get(spends, issue.id, 0.0)
 
-          spend > 0.0 and
-            state(spend, Estimate.for_issue(to_issue(issue), opts)) == :over_budget
+          if spend > 0.0 and
+               state(spend, Estimate.for_issue(to_issue(issue), opts)) == :over_budget,
+             do: [{issue.id, spend}],
+             else: []
         end)
-        |> Enum.map(& &1.id)
+        |> Map.new()
     end
   rescue
     error ->
-      Logger.warning("Usage.Budget.over_budget_ids failed: #{Exception.message(error)}")
-      []
+      Logger.warning("Usage.Budget.over_budget_spend failed: #{Exception.message(error)}")
+      %{}
   end
 
   # The ledger scan is bounded to the older of the rolling `:window_days`

@@ -346,6 +346,103 @@ defmodule WardmastWeb.BoardLifecycleLiveTest do
     end
   end
 
+  describe "budget alerts stay off the lane" do
+    test "a budget_exceeded alert is not a lane item", %{conn: conn, ws: ws} do
+      {:ok, alert} =
+        Alerts.raise_alert(%{
+          kind: :budget_exceeded,
+          key: "task-over-#{ws.id}",
+          workspace_id: ws.id,
+          subject: "worker spend over budget",
+          detail: "spend past p90"
+        })
+
+      view = live_board(conn)
+
+      refute has_element?(view, "#lane-alert-#{alert.id}")
+      assert has_element?(view, "#board-attention-count", "0")
+    end
+  end
+
+  describe "the lane's compact rows" do
+    test "shows five rows, then how many more", %{conn: conn, ws: ws} do
+      tickets =
+        for n <- 1..7, do: ws |> merging_issue("needs a person #{n}") |> operator_attention!()
+
+      view = live_board(conn)
+
+      shown = Enum.count(tickets, &has_element?(view, "#lane-ticket-#{&1.id}"))
+      assert shown == 5
+      assert has_element?(view, "#board-attention-more", "2 more")
+
+      view |> element("#board-attention-more") |> render_click()
+
+      assert Enum.all?(tickets, &has_element?(view, "#lane-ticket-#{&1.id}"))
+      refute has_element?(view, "#board-attention-more")
+    end
+  end
+
+  describe "parking a Merging ticket" do
+    test "parking moves it from Merging and the lane to the Parked tab, and back", %{
+      conn: conn,
+      ws: ws
+    } do
+      ticket = ws |> merging_issue("needs a discussion") |> operator_attention!()
+
+      view = live_board(conn)
+
+      assert in_column?(view, "merging", ticket.id)
+      refute has_element?(view, "#board-parked-tab")
+
+      view |> element("#board-park-#{ticket.id}") |> render_click()
+      assert has_element?(view, "#board-shelve-form")
+
+      view
+      |> form("#board-shelve-form",
+        shelve: %{reason: "discussion", back: "7", note: "waiting on Sam"}
+      )
+      |> render_submit()
+
+      _ = :sys.get_state(view.pid)
+      render_async_settled(view, @async_timeout)
+
+      parked = reload(ticket)
+      assert parked.state == :merging
+      assert parked.shelved_reason == :discussion
+      assert parked.shelved_note == "waiting on Sam"
+      assert %DateTime{} = parked.shelved_until
+
+      refute has_element?(view, "#board-shelve-form")
+      refute in_column?(view, "merging", ticket.id)
+      refute has_element?(view, "#lane-ticket-#{ticket.id}")
+      assert has_element?(view, "#board-parked-count", "1")
+
+      view |> element("#board-parked-tab") |> render_click()
+      assert has_element?(view, ~s(#parked-row-#{ticket.id}[data-shelf-reason="discussion"]))
+
+      view |> element("#board-unpark-#{ticket.id}") |> render_click()
+      _ = :sys.get_state(view.pid)
+      render_async_settled(view, @async_timeout)
+
+      assert reload(ticket).shelved_at == nil
+      assert in_column?(view, "merging", ticket.id)
+      assert has_element?(view, "#lane-ticket-#{ticket.id}")
+      refute has_element?(view, "#board-parked-tab")
+    end
+
+    test "the lane row has its own park button", %{conn: conn, ws: ws} do
+      ticket = ws |> merging_issue("needs a person") |> operator_attention!()
+
+      view = live_board(conn)
+
+      view |> element("#lane-park-#{ticket.id}") |> render_click()
+
+      assert has_element?(view, "#board-shelve-form", ticket.id)
+      view |> element("#board-shelve-cancel") |> render_click()
+      refute has_element?(view, "#board-shelve-form")
+    end
+  end
+
   # ---- 5. the per-viewer toggle -----------------------------------------------
 
   describe "the lane's toggle, remembered in browser storage by the hook" do

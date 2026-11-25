@@ -45,7 +45,9 @@ defmodule Wardmast.Board.Snapshot do
   nil elsewhere) and its `attention` (bd-8if9zt): a card with attention keeps
   its column and wears the marker. `:attention` lists every such card for the
   board's Needs-attention swimlane — operator-owned first, then oldest first —
-  with its column, owner and reason. System alerts (bd-7gt8rm) are not
+  with its column, owner and reason. A Merging ticket the operator parked
+  (`Wardmast.Tasks.Issue.shelved?/2`) is in neither: it is listed under
+  `:shelved`, with its reason, note and return date. System alerts (bd-7gt8rm) are not
   tickets and are not read here; the swimlane reads them from
   `Wardmast.Alerts.active/1`.
 
@@ -141,6 +143,7 @@ defmodule Wardmast.Board.Snapshot do
           verifying: [map()],
           closed_today: [map()],
           attention: [map()],
+          shelved: [map()],
           plan_capacity: non_neg_integer(),
           plan_capacity_binding: :budget | :machines,
           slots_used: non_neg_integer(),
@@ -324,7 +327,39 @@ defmodule Wardmast.Board.Snapshot do
       now: now
     }
 
-    Map.put(board, :attention, attention_items(board))
+    board
+    |> shelve(issues, now)
+    |> then(&Map.put(&1, :attention, attention_items(&1)))
+  end
+
+  # The board shelf: Merging tickets the operator parked
+  # (`Wardmast.Tasks.Issue.shelved?/2`) leave the Merging column — and so Needs
+  # attention, which is built from the columns — and are listed under
+  # `:shelved`, oldest parked first, each with the reason, note and return
+  # date. A return date that has passed reads as not parked.
+  defp shelve(board, issues, now) do
+    shelf =
+      issues
+      |> Enum.filter(&Wardmast.Tasks.Issue.shelved?(&1, now))
+      |> Map.new(&{&1.id, &1})
+
+    {parked, merging} = Enum.split_with(board.merging, &Map.has_key?(shelf, &1.id))
+
+    shelved =
+      parked
+      |> Enum.map(fn card ->
+        issue = Map.fetch!(shelf, card.id)
+
+        Map.put(card, :shelf, %{
+          reason: Map.get(issue, :shelved_reason),
+          note: Map.get(issue, :shelved_note),
+          at: Map.get(issue, :shelved_at),
+          until: Map.get(issue, :shelved_until)
+        })
+      end)
+      |> Enum.sort_by(&since_key(&1.shelf.at))
+
+    %{board | merging: merging} |> Map.put(:shelved, shelved)
   end
 
   # The scheduler walk (DC6; the only plan since DC12) over the Ready queue and
@@ -403,6 +438,12 @@ defmodule Wardmast.Board.Snapshot do
     :attention_owner_cause,
     :attention_note,
     :attention_owner_since,
+    # The board shelf (`shelve/3`): `Wardmast.Tasks.Issue.shelved?/2` reads
+    # these, and a parked Merging ticket leaves the column only if they load.
+    :shelved_at,
+    :shelved_reason,
+    :shelved_note,
+    :shelved_until,
     :description,
     :acceptance,
     :notes,
@@ -508,7 +549,8 @@ defmodule Wardmast.Board.Snapshot do
       idle_ids: idle_ids,
       paused: Keyword.get(opts, :paused, false),
       watchdog_live: Keyword.get_lazy(opts, :watchdog_live, fn -> watchdog_live(issues) end),
-      over_budget: Keyword.get_lazy(opts, :over_budget, fn -> Budget.over_budget_ids(issues) end)
+      over_budget:
+        Keyword.get_lazy(opts, :over_budget, fn -> Budget.over_budget_spend(issues) end)
     }
     |> put_walk_inputs(workspace, issues, opts)
     |> derive()
@@ -761,6 +803,7 @@ defmodule Wardmast.Board.Snapshot do
       verifying: [],
       closed_today: [],
       attention: [],
+      shelved: [],
       plan_capacity: 0,
       plan_capacity_binding: :machines,
       slots_used: 0,
@@ -1734,20 +1777,29 @@ defmodule Wardmast.Board.Snapshot do
   # reads one field everywhere instead of branching on which column built the
   # card — the same shape rule the parent ref follows.
 
-  defp over_budget_set(nil), do: MapSet.new()
-  defp over_budget_set(%MapSet{} = set), do: set
-  defp over_budget_set(ids) when is_list(ids), do: MapSet.new(ids)
+  # Normalised to id => spend in USD (nil when the caller passed ids only):
+  # `Budget.over_budget_spend/2` in production, a list or set in pure tests.
+  defp over_budget_set(nil), do: %{}
+  defp over_budget_set(%MapSet{} = set), do: Map.new(set, &{&1, nil})
+  defp over_budget_set(ids) when is_list(ids), do: Map.new(ids, &{&1, nil})
+  defp over_budget_set(%{} = spend), do: spend
 
   defp with_over_budget(cards, nil),
-    do: Enum.map(cards, &Map.put(&1, :over_budget, false))
+    do: Enum.map(cards, &put_over_budget(&1, %{}))
 
-  defp with_over_budget(cards, set),
-    do: Enum.map(cards, &Map.put(&1, :over_budget, MapSet.member?(set, &1.id)))
+  defp with_over_budget(cards, spend),
+    do: Enum.map(cards, &put_over_budget(&1, spend))
 
-  defp with_over_budget_in_entries(entries, set) do
-    Enum.map(entries, fn entry ->
-      %{entry | card: Map.put(entry.card, :over_budget, MapSet.member?(set, entry.card.id))}
-    end)
+  defp with_over_budget_in_entries(entries, spend) do
+    Enum.map(entries, fn entry -> %{entry | card: put_over_budget(entry.card, spend)} end)
+  end
+
+  # `over_budget_usd` is the spend so far, for the card's quiet marker; nil
+  # when the card is not over or the figure is unknown.
+  defp put_over_budget(card, spend) do
+    card
+    |> Map.put(:over_budget, Map.has_key?(spend, card.id))
+    |> Map.put(:over_budget_usd, Map.get(spend, card.id))
   end
 
   # A Ready entry wraps its card; the ref belongs on the card, where every
