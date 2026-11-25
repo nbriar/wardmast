@@ -499,8 +499,51 @@ defmodule WardmastWeb.CoreComponents.Core do
   attr :class, :any, default: nil
   attr :body_class, :any, default: nil
 
+  attr :collapsible, :boolean,
+    default: false,
+    doc: "render as a `<details>` whose header is the summary: a quiet, secondary panel"
+
+  attr :open, :boolean, default: true, doc: "with `collapsible`, whether it starts open"
+
   slot :actions, doc: "right-aligned header controls"
   slot :inner_block
+
+  def panel(%{collapsible: true} = assigns) do
+    ~H"""
+    <details
+      id={@id}
+      open={@open}
+      phx-mounted={Phoenix.LiveView.JS.ignore_attributes(["open"])}
+      class={[
+        "group/panel border rounded-[var(--radius-panel)] border-[var(--border-default)] overflow-hidden",
+        panel_surface_class(@surface),
+        @class
+      ]}
+    >
+      <summary class="flex cursor-pointer list-none items-center justify-between gap-3 px-[18px] py-[10px] border-[var(--border-default)] group-open/panel:border-b transition-colors duration-150 hover:bg-[var(--arb-raised-hover)] [&::-webkit-details-marker]:hidden">
+        <span class="flex items-center gap-[10px] min-w-0">
+          <.icon
+            name="hero-chevron-right-micro"
+            class="shrink-0 text-[var(--text-label)] transition-transform duration-150 group-open/panel:rotate-90"
+          />
+          <span class="font-medium text-[12px] tracking-[0.04em] text-[var(--text-secondary)]">
+            {@title}
+          </span>
+          <span
+            :if={@meta}
+            class="truncate text-[11px] text-[var(--text-label)] font-[family-name:var(--font-mono)]"
+          >
+            {@meta}
+          </span>
+        </span>
+        {render_slot(@actions)}
+      </summary>
+      <div class={[@padded && "px-[18px] py-[var(--space-4)]", @body_class]}>
+        {render_slot(@inner_block)}
+      </div>
+    </details>
+    """
+  end
 
   def panel(assigns) do
     ~H"""

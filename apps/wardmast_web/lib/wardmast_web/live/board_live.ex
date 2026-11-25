@@ -118,19 +118,6 @@ defmodule WardmastWeb.BoardLive do
   @rank_columns ["backlog", "ready"]
   @queued_columns ["blocked", "ready"]
 
-  @step_labels %{
-    implementing: "implementing",
-    in_review: "in review",
-    awaiting_ci: "waiting on CI",
-    addressing_review: "addressing review",
-    fixing_ci: "fixing CI",
-    resolving_conflict: "resolving conflict",
-    waiting_ci: "waiting on CI",
-    in_merge_queue: "in merge queue",
-    behind_base: "behind base",
-    merge_blocked: "merge blocked"
-  }
-
   @close_reason_labels %{completed: "completed", wont_do: "won't do", duplicate: "duplicate"}
 
   @impl true
@@ -956,8 +943,7 @@ defmodule WardmastWeb.BoardLive do
   defp ready_reason("blocked — " <> hold), do: "held — " <> hold
   defp ready_reason(reason), do: reason
 
-  defp step_label(nil), do: nil
-  defp step_label(step), do: Map.get(@step_labels, step, to_string(step))
+  defp step_label(step), do: WardmastWeb.TicketStatus.step_label(step)
 
   defp close_reason_label(nil), do: "closed"
   defp close_reason_label(reason), do: Map.get(@close_reason_labels, reason, to_string(reason))

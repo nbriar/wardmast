@@ -1,8 +1,8 @@
 defmodule WardmastWeb.TaskDetailAttentionTest do
   @moduledoc """
-  bd-8nlez1 (ticket lifecycle 7/13): the task page's attention strip — who
-  owns the ticket's attention and the note a hand-off left — and the
-  operator's hand-back button.
+  bd-8nlez1 (ticket lifecycle 7/13): the task page's attention — who owns
+  the ticket's attention and the note a hand-off left — and the operator's
+  hand-back button, now in the Your move card beside the status bar.
   """
   use WardmastWeb.ConnCase, async: false
 
@@ -52,5 +52,38 @@ defmodule WardmastWeb.TaskDetailAttentionTest do
     {:ok, view, _html} = live_task(conn, ~p"/tasks/#{quiet.id}")
 
     refute has_element?(view, "#task-attention")
+    assert has_element?(view, ~s(#task-your-move[data-state="none"]))
+  end
+
+  test "an operator item marks the status bar and the step chip", %{conn: conn, task: task} do
+    {:ok, _} = Attention.hand_off(task.id, :operator, "rotate the deploy key")
+
+    {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
+
+    assert has_element?(view, "#task-status-bar #task-needs-you-chip")
+    assert has_element?(view, ~s(#task-step-chip[data-tone="attention"]))
+    assert has_element?(view, ~s(#task-your-move[data-state="operator"]))
+  end
+
+  test "the status bar names a Ready ticket's state and its PR", %{conn: conn, ws: ws} do
+    {:ok, ready} = Ash.create(Issue, %{title: "ready", workspace_id: ws.id})
+    ready = put_state!(ready, :queued)
+    {:ok, ready} = Ash.update(ready, %{pr_ref: "#77"})
+
+    {:ok, view, _html} = live_task(conn, ~p"/tasks/#{ready.id}")
+
+    assert has_element?(view, "#task-status-bar #task-step-chip", "ready")
+    assert has_element?(view, "#task-status-bar #task-pr-chip", "#77")
+    refute has_element?(view, "#task-needs-you-chip")
+  end
+
+  test "detail panels are collapsible below the fold", %{conn: conn, ws: ws} do
+    {:ok, t} = Ash.create(Issue, %{title: "t", description: "the spec", workspace_id: ws.id})
+    {:ok, view, _html} = live_task(conn, ~p"/tasks/#{t.id}")
+
+    assert has_element?(view, "details#panel-description[open]")
+    assert has_element?(view, "details#panel-messages")
+    refute has_element?(view, "details#panel-messages[open]")
+    assert has_element?(view, "#task-above-fold #panel-current-run")
   end
 end
