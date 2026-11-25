@@ -21,6 +21,7 @@ defmodule Wardmast.Board.CapacityView do
         repos: [repo],        # one per capped repo (DC9): label, cap, used, free, state
         fair_share: [row],    # DC10: one per pool of an account that splits `fair`
         ci_backpressure: [row] # #1126: one per repo with a `ci_backpressure` gate
+        target_red_hold: [row] # local: one per repo with `hold_on_target_red`
       }
 
   A `fair_share` row (DC10, design §5.3) is `%{account:, pool:, label:, budget:,
@@ -58,6 +59,7 @@ defmodule Wardmast.Board.CapacityView do
   alias Wardmast.Board.AdmissionShadowEvent
   alias Wardmast.Board.CiBackpressure
   alias Wardmast.Board.FairShare
+  alias Wardmast.Board.TargetRedHold
   alias Wardmast.Board.WalkInputs
   alias Wardmast.Nodes.LocalCapacity
   alias Wardmast.Nodes.Overview
@@ -82,7 +84,8 @@ defmodule Wardmast.Board.CapacityView do
       machines: machines(opts),
       repos: repos(opts),
       fair_share: fair_share(opts),
-      ci_backpressure: ci_backpressure(opts)
+      ci_backpressure: ci_backpressure(opts),
+      target_red_hold: target_red_hold(opts)
     }
   end
 
@@ -436,6 +439,12 @@ defmodule Wardmast.Board.CapacityView do
   defp ci_backpressure(opts) do
     workspaces = Keyword.get_lazy(opts, :workspaces, &read_workspaces/0)
     safe(fn -> CiBackpressure.status(workspaces, Keyword.get(opts, :ci_backpressure, [])) end, [])
+  end
+
+  # Local: the per-repo target-red hold (`TargetRedHold.status/2`).
+  defp target_red_hold(opts) do
+    workspaces = Keyword.get_lazy(opts, :workspaces, &read_workspaces/0)
+    safe(fn -> TargetRedHold.status(workspaces, Keyword.get(opts, :target_red_hold, [])) end, [])
   end
 
   defp read_workspaces, do: safe(fn -> Ash.read!(Workspace) end, [])

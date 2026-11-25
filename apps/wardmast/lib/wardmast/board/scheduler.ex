@@ -163,6 +163,7 @@ defmodule Wardmast.Board.Scheduler do
           optional(:card_guardrail) => %{optional(String.t()) => :ok | {:hold, String.t()}},
           optional(:card_local) => %{optional(String.t()) => {:hold, String.t()}},
           optional(:card_ci) => %{optional(String.t()) => :ok | {:hold, String.t()}},
+          optional(:card_target_red) => %{optional(String.t()) => {:hold, String.t()}},
           optional(:dispatch_holds) => %{optional(String.t()) => {:hold, String.t()}},
           optional(:paused) => boolean(),
           optional(:walk) => walk()
@@ -327,6 +328,8 @@ defmodule Wardmast.Board.Scheduler do
       # #1126: per-ticket CI backpressure holds — the card's repo has too many MR
       # pipelines waiting for a runner. A card's own block, like the above.
       card_ci: Map.get(input, :card_ci) || %{},
+      # Local: per-ticket target-red holds (`Wardmast.Board.TargetRedHold`).
+      card_target_red: Map.get(input, :card_target_red) || %{},
       slots_free: Map.get(input, :slots_free, 0),
       slot_note: Map.get(input, :slot_note)
     }
@@ -437,6 +440,7 @@ defmodule Wardmast.Board.Scheduler do
       guardrail: Map.get(board.card_guardrail, card.id),
       local_capacity: Map.get(board.card_local, card.id),
       ci_saturated: Map.get(board.card_ci, card.id),
+      target_red: Map.get(board.card_target_red, card.id),
       scope: scope_of(card),
       repo: Map.get(card, :repo),
       in_flight: claims(acc)
@@ -506,6 +510,10 @@ defmodule Wardmast.Board.Scheduler do
   defp phrase({:ci_saturated, _detail} = hold, _mutex),
     do: "held — " <> Lifecycle.describe_hold(hold)
 
+  # Local: `held — target branch red (…)`.
+  defp phrase({:target_red, _detail} = hold, _mutex),
+    do: "held — " <> Lifecycle.describe_hold(hold)
+
   defp phrase(hold, _mutex), do: "blocked — " <> Lifecycle.describe_hold(hold)
 
   # A bare list of ids is accepted so a caller that has no states to report
@@ -563,6 +571,7 @@ defmodule Wardmast.Board.Scheduler do
       paused: Map.get(input, :paused) == true,
       card_guardrail: Map.get(input, :card_guardrail) || %{},
       card_ci: Map.get(input, :card_ci) || %{},
+      card_target_red: Map.get(input, :card_target_red) || %{},
       dispatch_holds: Map.get(input, :dispatch_holds) || %{}
     }
   end
@@ -602,6 +611,7 @@ defmodule Wardmast.Board.Scheduler do
       provider_constraint: Map.get(board.dispatch_holds, card.id),
       guardrail: Map.get(board.card_guardrail, card.id),
       ci_saturated: Map.get(board.card_ci, card.id),
+      target_red: Map.get(board.card_target_red, card.id),
       scope: scope_of(card),
       repo: Map.get(card, :repo),
       in_flight: acc.in_flight

@@ -226,6 +226,7 @@ defmodule Wardmast.Worker.ReviewGate do
   alias Wardmast.Agents.SecurityPolicy
   alias Wardmast.CircuitBreaker
   alias Wardmast.Guardrails.Gate
+  alias Wardmast.Mergers
   alias Wardmast.Mergers.NetDiff
   alias Wardmast.Messages.CoordinatorNotifier
   alias Wardmast.Nodes.LocalCapacity
@@ -244,6 +245,8 @@ defmodule Wardmast.Worker.ReviewGate do
   alias Wardmast.Usage.Event, as: UsageEvent
   alias Wardmast.Worker
   alias Wardmast.Worker.CiRerunBudget
+  alias Wardmast.Worker.CiSync
+  alias Wardmast.Worker.CiTriageLog
   alias Wardmast.Worker.CiUnrun
   alias Wardmast.Worker.ClaudeSession
   alias Wardmast.Worker.ConflictAbortFindings
@@ -276,6 +279,7 @@ defmodule Wardmast.Worker.ReviewGate do
   alias Wardmast.Worker.Withholding
   alias Wardmast.Worker.Worktree
   alias Wardmast.Workers.Run
+  alias Wardmast.Workflows.MergeQueue.CiTriage
 
   # Default ceiling on how long we wait for a reviewer / implementer pass before
   # escalating as timed out. Real Claude work can take a while; tests override.
@@ -1281,6 +1285,9 @@ defmodule Wardmast.Worker.ReviewGate do
       # token that identifies its poll timer. nil whenever no reviewer is being
       # held back.
       ci_wait: nil,
+      # Local: the reason `CiSync.target_hold/5` gave while the target branch's
+      # own CI is red and this head's red is held (`ci_target_gate/4`), else nil.
+      ci_target_hold: nil,
       # bd-dun10t: set when red CI launched the current fix round (`ci_fix/4`):
       # `%{sha:, checks:}`. A round that ends with no diff reruns CI instead of
       # parking, `ci_noop_reruns` times at most.
@@ -1901,8 +1908,120 @@ defmodule Wardmast.Worker.ReviewGate do
 
     {state, wait, reading} = ci_retarget(state, wait, reading, result)
     wait = Map.put(wait, :pipeline_id, Map.get(result, :pipeline_id))
-    {action, wait} = ReviewCi.advance(wait, reading, ci_pipeline_info(result))
-    ci_act(state, wait, action, result)
+    {action, advanced} = ReviewCi.advance(wait, reading, ci_pipeline_info(result))
+
+    case ci_target_gate(state, advanced, action, result) do
+      # A held poll is not counted toward the ceiling: the head is waiting on
+      # the target, not stalled.
+      {:hold, state} -> {:wait, ci_schedule(state, %{advanced | polls: wait.polls})}
+      {:go, state} -> ci_act(state, advanced, action, result)
+    end
+  end
+
+  # Local: the target branch's own CI is red (`CiSync.target_hold/5`, the
+  # watchdog's `ci_remediation_gate/3` rule). A red head then proves nothing
+  # about this diff, so no re-run, no visual refresh and no implementer round is
+  # spent on it: the gate keeps polling until the target is green, then syncs a
+  # stale head once so CI runs with the target's fix. Fails open.
+  defp ci_target_gate(state, wait, action, result) when action in [:rerun, :fix] do
+    base = Map.get(result, :base_ref) || state.target_branch
+
+    case ci_target_red(state, base) do
+      why when is_binary(why) ->
+        {:hold, ci_hold_for_target(state, wait, why)}
+
+      nil when is_binary(state.ci_target_hold) ->
+        ci_release_target_hold(state, wait, base)
+
+      nil ->
+        {:go, state}
+    end
+  end
+
+  defp ci_target_gate(state, _wait, _action, _result), do: {:go, %{state | ci_target_hold: nil}}
+
+  defp ci_target_red(%{ci_ctx: ctx} = state, base) do
+    read = fn -> CiSync.target_hold(ctx.adapter, ctx.pr_ref, base, ctx.workspace, state.repo) end
+
+    case ReviewCi.call(ctx.workspace, state.repo, read) do
+      {:ok, why} when is_binary(why) -> why
+      _ -> nil
+    end
+  end
+
+  defp ci_hold_for_target(%{ci_target_hold: why} = state, _wait, why), do: state
+
+  defp ci_hold_for_target(state, wait, why) do
+    Logger.warning(
+      "ReviewGate: holding CI-red handling for task=#{state.task_id} round #{state.round} on " <>
+        "#{wait.sha} — #{why}; no re-run, no fix round until the target is green"
+    )
+
+    checks = ci_failing_checks(state)
+    triage = CiTriage.classify(checks, :unknown, target_hold: why)
+
+    safe(fn ->
+      CiTriageLog.record(
+        state.task_id,
+        wait.sha,
+        "ReviewGate holding CI-red handling; #{why}",
+        triage
+      )
+    end)
+
+    state
+    |> record_thread(
+      :system,
+      "Round #{state.round}: CI red, target branch red",
+      "CI is red on #{wait.sha}, but the target branch's own CI is red too (#{why}), so the " <>
+        "failure is not this diff's to fix. No implementer round is sent; the gate waits " <>
+        "for the target to go green."
+    )
+    |> Map.put(:ci_target_hold, why)
+  end
+
+  defp ci_release_target_hold(state, wait, base) do
+    Logger.info(
+      "ReviewGate: task=#{state.task_id} target #{base} no longer red (was: " <>
+        "#{state.ci_target_hold}); resuming CI-red handling on #{wait.sha}"
+    )
+
+    state = %{state | ci_target_hold: nil}
+
+    case ci_sync_stale_head(state, base, wait.sha) do
+      {:synced, behind} ->
+        state =
+          record_thread(
+            state,
+            :system,
+            "Round #{state.round}: synced with the target",
+            "The target branch is green again and #{wait.sha} was #{behind} commit(s) behind " <>
+              "#{base}, so the branch was synced; the gate waits on CI for the synced head."
+          )
+
+        {:hold, state}
+
+      :no_sync ->
+        {:go, state}
+    end
+  end
+
+  defp ci_sync_stale_head(%{ci_ctx: ctx} = state, base, head) do
+    with {:stale, behind} <- CiSync.check(ctx.workspace, state.repo, base, head),
+         {:ok, :ok} <-
+           ReviewCi.call(ctx.workspace, state.repo, fn ->
+             Mergers.update_branch(ctx.adapter, ctx.pr_ref, ctx.workspace, state.repo)
+           end) do
+      {:synced, behind}
+    else
+      other ->
+        Logger.info(
+          "ReviewGate: task=#{state.task_id} not syncing #{head} after the target hold " <>
+            "(#{inspect(other)})"
+        )
+
+        :no_sync
+    end
   end
 
   # "pipeline 12 (pending)": what an escalation names, so a stuck run is findable.
@@ -2308,7 +2427,10 @@ defmodule Wardmast.Worker.ReviewGate do
   defp ci_schedule(state, wait) do
     token = make_ref()
     Process.send_after(self(), {:ci_poll, token}, state.ci_ctx.budget.interval_ms)
-    marked = {wait.sha, not is_nil(wait.rerun), wait.polls, wait.queued_polls}
+    # Held polls do not move the count, so a target-red hold (Local) renews the
+    # marker every 5 minutes instead; it would otherwise expire mid-hold.
+    held = state.ci_target_hold && div(System.monotonic_time(:second), 300)
+    marked = {wait.sha, not is_nil(wait.rerun), wait.polls, wait.queued_polls, held}
 
     since =
       if state.ci_wait, do: state.ci_wait.since, else: DateTime.to_iso8601(DateTime.utc_now())
@@ -2327,6 +2449,11 @@ defmodule Wardmast.Worker.ReviewGate do
       # `polls` / `max_polls` let `worker show` / `prime` say how far the wait is.
       extra = %{"polls" => wait.polls, "max_polls" => wait.max_polls, "since" => since}
       extra = if wait.rerun, do: Map.put(extra, "rerun", true), else: extra
+
+      extra =
+        if state.ci_target_hold,
+          do: Map.put(extra, "target_hold", state.ci_target_hold),
+          else: extra
 
       extra =
         if wait.queued_polls > 0 do
@@ -4973,6 +5100,7 @@ defmodule Wardmast.Worker.ReviewGate do
         ci_green: nil,
         ci_fallback: nil,
         ci_wait: nil,
+        ci_target_hold: nil,
         ci_retargets: 0,
         review_node: nil
     }

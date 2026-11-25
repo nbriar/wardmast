@@ -41,6 +41,8 @@ defmodule Wardmast.Tasks.Lifecycle.Dispatchable do
       (`Wardmast.Nodes.LocalCapacity`'s phrase, bd-akp9ae);
     * `:ci_saturated` — `:ok`, or `{:hold, detail}`: the ticket's repo has too many
       MR pipelines waiting on a CI runner (`Wardmast.Board.CiBackpressure`, #1126);
+    * `:target_red` — `:ok`, or `{:hold, detail}`: the ticket's repo's target branch
+      is red (`Wardmast.Board.TargetRedHold`, local patch);
     * `:slots_free` — free slots; absent means "not asked".
 
   ## Holds, in precedence order
@@ -60,6 +62,7 @@ defmodule Wardmast.Tasks.Lifecycle.Dispatchable do
   | `{:guardrail, detail}` | no model its guardrails allow can take it, or a permission awaits the operator's grant |
   | `{:local_capacity, phrase}` | it can only run on the primary, whose own cap is full |
   | `{:ci_saturated, detail}` | its repo's CI queue is saturated (`worker.repos.<repo>.ci_backpressure`) |
+  | `{:target_red, detail}` | its repo's target branch is red (`worker.repos.<repo>.hold_on_target_red`) |
   | `:paused` | the scheduler is paused |
   | `{:quota, reason}` | a quota or auth hold |
   | `:no_slot` | no free worker slot |
@@ -78,6 +81,7 @@ defmodule Wardmast.Tasks.Lifecycle.Dispatchable do
           | {:guardrail, String.t()}
           | {:local_capacity, String.t()}
           | {:ci_saturated, String.t()}
+          | {:target_red, String.t()}
           | :paused
           | {:quota, String.t()}
           | :no_slot
@@ -101,7 +105,8 @@ defmodule Wardmast.Tasks.Lifecycle.Dispatchable do
          :ok <- provider_constraint_hold(ctx),
          :ok <- guardrail_hold(ctx),
          :ok <- local_capacity_hold(ctx),
-         :ok <- ci_saturated_hold(ctx) do
+         :ok <- ci_saturated_hold(ctx),
+         :ok <- target_red_hold(ctx) do
       board_hold(ctx)
     end
   end
@@ -123,6 +128,7 @@ defmodule Wardmast.Tasks.Lifecycle.Dispatchable do
   def describe_hold({:guardrail, detail}), do: "guardrail (#{detail})"
   def describe_hold({:local_capacity, phrase}), do: phrase
   def describe_hold({:ci_saturated, detail}), do: "CI saturated (#{detail})"
+  def describe_hold({:target_red, detail}), do: "target branch red (#{detail})"
   def describe_hold(:paused), do: "scheduler paused"
   def describe_hold({:quota, reason}), do: reason
   def describe_hold(:no_slot), do: "no free worker slot"
@@ -197,6 +203,11 @@ defmodule Wardmast.Tasks.Lifecycle.Dispatchable do
   # the above: it does not hold the queue behind it, whose repos may have room.
   defp ci_saturated_hold(%{ci_saturated: {:hold, detail}}), do: {:held, {:ci_saturated, detail}}
   defp ci_saturated_hold(_ctx), do: :ok
+
+  # Local: the ticket's repo's target branch is red, so a branch cut from it now
+  # would only go red too. The card's own block: other repos' cards still go.
+  defp target_red_hold(%{target_red: {:hold, detail}}), do: {:held, {:target_red, detail}}
+  defp target_red_hold(_ctx), do: :ok
 
   defp board_hold(%{paused: true}), do: {:held, :paused}
   defp board_hold(%{quota: {:hold, reason}}), do: {:held, {:quota, reason}}

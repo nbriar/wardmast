@@ -3584,7 +3584,10 @@ defmodule Wardmast.MCP.Catalog do
           "`machines` (cap, live, free), `repos`, `fair_share` and `ci_backpressure` (one per " <>
           "repo gated by `worker.repos.<repo>.ci_backpressure`: the cached pending MR-pipeline " <>
           "count, the thresholds and `state` held|clear|unknown — `held` means no NEW " <>
-          "implement run starts for that repo). Coordinator only.",
+          "implement run starts for that repo), and `target_red_hold` (one per repo with " <>
+          "`worker.repos.<repo>.hold_on_target_red`: `state` held|clear|unknown and the " <>
+          "red pipeline as `detail` — `held` likewise starts no NEW implement run). " <>
+          "Coordinator only.",
       input_schema: %{"type" => "object", "properties" => %{}, "additionalProperties" => false},
       handler: &Tools.scheduler_status/2
     },

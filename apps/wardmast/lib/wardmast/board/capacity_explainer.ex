@@ -495,6 +495,20 @@ defmodule Wardmast.Board.CapacityExplainer do
     }
   end
 
+  # Local: the ticket's repo's target branch is red (`TargetRedHold`).
+  def hold({:target_red, detail}, _board, opts) do
+    %{
+      kind: :capacity,
+      badge: "target red",
+      summary:
+        "This repo's target branch is red (#{detail}), so no new work starts for it: a " <>
+          "branch cut from it now would go red too. Fix rounds, reviews and merges of open " <>
+          "PRs keep going, and it starts on its own once the target is green " <>
+          "(`worker.repos.<repo>.hold_on_target_red`).",
+      details: opts[:raw] || detail
+    }
+  end
+
   def hold(:paused, _board, opts) do
     %{
       kind: :scheduler_paused,

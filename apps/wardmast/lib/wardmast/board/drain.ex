@@ -364,7 +364,8 @@ defmodule Wardmast.Board.Drain do
       machines: view.machines,
       repos: view.repos,
       fair_share: view.fair_share,
-      ci_backpressure: Map.get(view, :ci_backpressure, [])
+      ci_backpressure: Map.get(view, :ci_backpressure, []),
+      target_red_hold: Map.get(view, :target_red_hold, [])
     }
   end
 
@@ -375,7 +376,8 @@ defmodule Wardmast.Board.Drain do
       machines: [],
       repos: [],
       fair_share: [],
-      ci_backpressure: []
+      ci_backpressure: [],
+      target_red_hold: []
     }
 
   # bd-b2iigy: an automatic resume waiting on the primary's own worker cap

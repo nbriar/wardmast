@@ -701,7 +701,7 @@ defmodule Wardmast.Tasks.Workspace.ConfigSchema do
                       prepush_check_timeout_seconds, prepush_check_on_timeout,
                       pre_push_checks, pre_push_budget_seconds,
                       pre_push_max_attempts, visual_baselines, preview, max_concurrent,
-                      ci_backpressure},
+                      ci_backpressure, hold_on_target_red},
                       deep-merged over the workspace-level value (per-repo wins)
                       max_concurrent (per repo only) is a positive integer, unset
                       by default: the most implementer runs (the implementer,
@@ -720,6 +720,12 @@ defmodule Wardmast.Tasks.Workspace.ConfigSchema do
                       holds nothing. GitLab pending/created/waiting_for_resource
                       merge-request pipelines, GitHub queued pull-request runs.
                       Shown in scheduler_status as ci_backpressure.
+                      hold_on_target_red (per repo only, local patch) is a boolean,
+                      off by default: while the repo's target branch (merge.base)
+                      has a red pipeline (the target_red_* rules) the scheduler
+                      starts no NEW implement run for it (`held — target branch
+                      red (…)`); fix passes, review rounds, merges and P0 tickets
+                      are not held. Shown in scheduler_status as target_red_hold.
 
                       umbrella:    ["deps", "_build/test/lib", "_build/dev/lib", "priv/plts"]
                       single app:  ["deps", "_build/test", "_build/dev", "priv/plts"]

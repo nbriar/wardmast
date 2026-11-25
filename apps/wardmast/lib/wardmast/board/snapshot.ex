@@ -80,6 +80,7 @@ defmodule Wardmast.Board.Snapshot do
   alias Wardmast.Board.QueueOrder
   alias Wardmast.Board.ReadySince
   alias Wardmast.Board.Scheduler
+  alias Wardmast.Board.TargetRedHold
   alias Wardmast.Board.WalkInputs
   alias Wardmast.Guardrails.Alternatives
   alias Wardmast.Nodes.LocalCapacity
@@ -294,6 +295,7 @@ defmodule Wardmast.Board.Snapshot do
         card_guardrail: Map.get(input, :card_guardrail, %{}),
         card_local: Map.get(input, :card_local, %{}),
         card_ci: Map.get(input, :card_ci, %{}),
+        card_target_red: Map.get(input, :card_target_red, %{}),
         paused: paused?
       })
 
@@ -524,6 +526,8 @@ defmodule Wardmast.Board.Snapshot do
         end),
       card_local: Keyword.get_lazy(opts, :card_local, fn -> ticket_local_holds(issues) end),
       card_ci: Keyword.get_lazy(opts, :card_ci, fn -> ticket_ci_holds(issues, opts) end),
+      card_target_red:
+        Keyword.get_lazy(opts, :card_target_red, fn -> ticket_target_red_holds(issues, opts) end),
       dispatch_holds: Keyword.get(opts, :dispatch_holds, %{}),
       resume_queued: Keyword.get(opts, :resume_queued, []),
       local_held: Keyword.get(opts, :local_held, []),
@@ -1296,6 +1300,28 @@ defmodule Wardmast.Board.Snapshot do
       |> Enum.reject(&is_nil/1)
 
     CiBackpressure.holds(workspaces, queued, Keyword.get(opts, :ci_backpressure, []))
+  rescue
+    _ -> %{}
+  end
+
+  # Local: a Ready card whose repo's target branch is red is held
+  # (`Wardmast.Board.TargetRedHold`, `worker.repos.<repo>.hold_on_target_red`).
+  # Cached and fail-open, like the CI backpressure hold above.
+  defp ticket_target_red_holds(issues, opts) do
+    queued =
+      Enum.filter(issues, fn issue ->
+        Lifecycle.state_of(issue) == :queued and not epic?(issue) and
+          is_binary(Map.get(issue, :repo))
+      end)
+
+    workspaces =
+      queued
+      |> Enum.map(&Map.get(&1, :workspace_id))
+      |> Enum.uniq()
+      |> Enum.map(&safe_workspace/1)
+      |> Enum.reject(&is_nil/1)
+
+    TargetRedHold.holds(workspaces, queued, Keyword.get(opts, :target_red_hold, []))
   rescue
     _ -> %{}
   end

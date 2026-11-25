@@ -292,6 +292,7 @@ defmodule Wardmast.Tasks.Workspace.Changes.ValidateConfig do
         |> validate_worker_block(block, "worker.repos.#{repo}")
         |> validate_repo_cap(block, "worker.repos.#{repo}")
         |> validate_ci_backpressure(Map.fetch(block, "ci_backpressure"), "worker.repos.#{repo}")
+        |> validate_hold_on_target_red(block, "worker.repos.#{repo}")
         |> validate_image(Map.get(block, "image"), "worker.repos.#{repo}.image", :repo)
 
       {repo, _}, cs ->
@@ -321,6 +322,20 @@ defmodule Wardmast.Tasks.Workspace.Changes.ValidateConfig do
           field: :config,
           message: "#{label}.max_concurrent must be a positive integer"
         )
+    end
+  end
+
+  # Local: the target-red dispatch hold (`Wardmast.Board.TargetRedHold`), per repo.
+  defp validate_hold_on_target_red(changeset, block, label) do
+    case Map.fetch(block, "hold_on_target_red") do
+      {:ok, value} when not is_boolean(value) ->
+        Changeset.add_error(changeset,
+          field: :config,
+          message: "#{label}.hold_on_target_red must be true or false"
+        )
+
+      _ ->
+        changeset
     end
   end
 

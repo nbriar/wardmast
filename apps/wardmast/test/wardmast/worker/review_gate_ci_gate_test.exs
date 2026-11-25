@@ -722,6 +722,69 @@ defmodule Wardmast.Worker.ReviewGateCiGateTest do
     end
   end
 
+  # ---- Local: the target branch is red ---------------------------------------
+
+  describe "red CI on a red target branch (Local)" do
+    setup do
+      StubMerger.set_failing_checks(@pr, [
+        %{name: "test_ruby", summary: "1) Admin::AiResearchesControllerTest", url: "u", files: []}
+      ])
+
+      StubMerger.set_branch_pipeline({:ok, %{id: 77, sha: "abc1234", status: "failed", url: nil}})
+      :ok
+    end
+
+    test "holds without a re-run or fix round, past the poll ceiling; a green target releases it",
+         ctx do
+      rig = rig(ctx, "feature/target-red-1")
+      forge = start_forge(ctx, rig, [:failed])
+
+      gate = start_gate(rig, ctx, revise_command: [@revise_commit], rounds: 3, ci_max_polls: 4)
+
+      # Twice the poll ceiling: held polls are not counted against it.
+      wait_until(fn -> StubMerger.get_count(@pr) >= 8 end, 30_000)
+      held = :sys.get_state(gate)
+      assert held.phase == :awaiting_ci
+      assert held.ci_target_hold =~ "target branch red: main pipeline 77"
+      assert passes(rig) == 0
+      assert StubMerger.ci_reruns() == []
+      assert remote_head(ctx, rig) == rig.head
+
+      notes = Ash.get!(Issue, rig.task.id).notes || ""
+      assert length(String.split(notes, "ReviewGate holding CI-red handling")) == 2
+
+      StubMerger.set_branch_pipeline(
+        {:ok, %{id: 78, sha: "def5678", status: "success", url: nil}}
+      )
+
+      set_pipeline(forge, [:success])
+
+      wait_until(fn -> passes(rig) == 1 end, 20_000)
+      assert reviewed_head(rig) == rig.head
+      stop_gate(gate)
+    end
+
+    test "once the target is green, a head behind it is synced instead of sent to a fix round",
+         ctx do
+      put_app_env(:wardmast, :merge_freshness_probe, fn _path, _base, _head -> {:ok, 1} end)
+
+      rig = rig(ctx, "feature/target-red-2")
+      start_forge(ctx, rig, [:failed])
+
+      gate = start_gate(rig, ctx, revise_command: [@revise_commit], rounds: 3)
+      wait_until(fn -> :sys.get_state(gate).ci_target_hold != nil end)
+
+      StubMerger.set_branch_pipeline(
+        {:ok, %{id: 78, sha: "def5678", status: "success", url: nil}}
+      )
+
+      wait_until(fn -> StubMerger.update_branch_count(@pr) == 1 end)
+
+      assert Enum.any?(:sys.get_state(gate).thread, &(&1.subject =~ "synced with the target"))
+      stop_gate(gate)
+    end
+  end
+
   # ---- #360: cancelled checks are infrastructure, never a fix round -----------
 
   # bd-6vvpau: the deterministic visual-baseline refresh on the pre-review CI wait.
