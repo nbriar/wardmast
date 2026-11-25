@@ -244,10 +244,26 @@ defmodule WardmastWeb.CoreComponents.Domain do
 
   attr :footer, :string, default: nil, doc: ~s(right-aligned mono footer, e.g. "w-14 · sonnet")
   attr :muted, :boolean, default: false, doc: "closed/merged treatment"
+
+  attr :density, :string,
+    values: ~w(default compact),
+    default: "default",
+    doc:
+      "`compact` is the status row: the title clamps to two lines and priority, the " <>
+        "`chips` slot and the `parent` slot share one row under it. `activity`, " <>
+        "`detail`, `type`, `difficulty` and `footer` are not rendered — a compact " <>
+        "card's caller puts what it needs of them in its chips"
+
   attr :class, :any, default: nil
   attr :rest, :global
 
   slot :status, doc: "top-right slot — normally a status chip or an elapsed/waiting time"
+
+  slot :chips,
+    doc:
+      "compact density only: the status row's chips after the priority tag — the " <>
+        "board's step, PR and attention chips"
+
   slot :actions, doc: "row of inline action chips"
 
   slot :detail,
@@ -261,6 +277,67 @@ defmodule WardmastWeb.CoreComponents.Domain do
       "a line under the title for what this card belongs to — the board fills " <>
         "it with `<.parent_link mode=\"compact\">`, the `↳ bd-epic` chip that " <>
         "replaced epic cards on the board (bd-38of5i)"
+
+  def task_card(%{density: "compact"} = assigns) do
+    assigns = assign(assigns, :hue, task_card_hue(assigns.accent))
+
+    ~H"""
+    <article
+      data-density="compact"
+      class={[
+        "flex flex-col gap-2 px-[11px] py-[10px] rounded-[var(--radius-field)] border border-solid",
+        "transition-[background] duration-[var(--dur-hover)] ease-[var(--arb-ease-out)]",
+        task_card_surface_class(@muted, @hue),
+        task_card_border_class(@accent, @muted),
+        task_card_rule_class(@accent, @muted),
+        @class
+      ]}
+      {@rest}
+    >
+      <div class="flex items-center justify-between gap-2">
+        <span class="inline-flex items-center gap-0.5">
+          <span class={[
+            "font-medium text-[10.5px] font-[family-name:var(--font-mono)]",
+            @muted && "text-[var(--text-label)]",
+            !@muted && "text-[var(--text-secondary)]"
+          ]}>
+            {@id}
+          </span>
+          <WardmastWeb.CoreComponents.Core.copy_id id={@id} dom_id={@copy_dom_id} />
+        </span>
+        {render_slot(@status)}
+      </div>
+
+      <span
+        title={@title}
+        class={[
+          "text-[12.5px] leading-[1.4] line-clamp-2",
+          @muted && "font-normal text-[var(--text-secondary)]",
+          !@muted && "font-medium text-[var(--text-title)]"
+        ]}
+      >
+        {@title}
+      </span>
+
+      <div
+        :if={@priority != nil or @chips != [] or @parent != []}
+        class="arb-card-meta flex flex-wrap items-center gap-1 min-w-0"
+      >
+        <.priority_tag
+          :if={@priority != nil}
+          id={"#{@id}-priority"}
+          priority={@priority}
+          lift={@lift}
+          class="badge-sm font-[family-name:var(--font-mono)]"
+        />
+        {render_slot(@chips)}
+        {render_slot(@parent)}
+      </div>
+
+      <div :if={@actions != []} class="flex gap-1.5">{render_slot(@actions)}</div>
+    </article>
+    """
+  end
 
   def task_card(assigns) do
     assigns = assign(assigns, :hue, task_card_hue(assigns.accent))

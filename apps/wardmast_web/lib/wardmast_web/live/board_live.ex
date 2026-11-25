@@ -24,7 +24,11 @@ defmodule WardmastWeb.BoardLive do
       when it clears) is in the badge's hover / focus / tap popup, with the
       scheduler's own phrase kept as a "details" line
       (`Wardmast.Board.CapacityExplainer`, bd-5fl9sx);
-    * **In progress** and **Merging** — the computed `step`;
+    * **In progress** and **Merging** — the computed `step`, as a chip in one
+      status row with the priority, the ticket's PR (`pr_ref`, opening
+      `merger_url` on the forge) and its attention, when it has them. The
+      run's live activity is the step chip's hover title, and the chip links
+      where the next move is made (the worker, or the merge queue);
     * **Closed** — the `close_reason` (completed / won't do / duplicate).
 
   ## The slot cap, explained
@@ -115,6 +119,11 @@ defmodule WardmastWeb.BoardLive do
   ]
 
   @column_keys Enum.map(@columns, & &1.key)
+
+  # The columns whose cards use the compact status row (`task_card`'s
+  # `density="compact"`): the work is under way, so step, PR and attention
+  # are what a glance needs; priority stays, difficulty goes.
+  @compact_columns ["in_progress", "merging"]
   @rank_columns ["backlog", "ready"]
   @queued_columns ["blocked", "ready"]
 
@@ -1000,6 +1009,27 @@ defmodule WardmastWeb.BoardLive do
 
   defp card_type(_column, _card), do: nil
 
+  # The compact card's step chip says the column's detail; a card with none
+  # (a workerless In progress card has no step yet) says its activity instead.
+  defp step_text(column, card), do: detail(column, card) || Map.get(card, :activity)
+
+  # The run's activity, as the step chip's title — only when it says more than
+  # the chip already does (`in review` under `in review` was the duplicate).
+  defp step_hint(column, card, step) do
+    case Map.get(card, :activity) do
+      activity when is_binary(activity) and activity != step and column == "in_progress" ->
+        activity
+
+      _ ->
+        nil
+    end
+  end
+
+  # An operator's attention outranks the live rule: the one card on the board
+  # that needs you should not read as just another running one.
+  defp compact_accent(_column, %{attention: %{owner: :operator}}), do: "attention"
+  defp compact_accent(column, card), do: accent(column, card)
+
   defp owner_label(:operator), do: "you"
   defp owner_label(:coordinator), do: "coordinator"
   defp owner_label(other), do: to_string(other)
@@ -1550,9 +1580,64 @@ defmodule WardmastWeb.BoardLive do
   attr(:holds, :map, default: %{}, doc: "ticket id => `CapacityExplainer` hold explanation")
   attr(:layers, :map, default: %{}, doc: "ticket id => `CapacityExplainer` walk layer (DC5)")
 
-  # One card, any column. What differs per column is read through the
+  # In progress and Merging: the compact status row. One step chip replaces
+  # the activity and detail lines, which often said the same thing twice.
+  defp board_card(%{column: column} = assigns) when column in @compact_columns do
+    card = assigns.card
+    step = step_text(column, card)
+
+    assigns =
+      assign(assigns,
+        step: step,
+        step_hint: step_hint(column, card, step),
+        step_href: activity_href(column, card)
+      )
+
+    ~H"""
+    <.task_card
+      id={@card.id}
+      title={@card.title || @card.id}
+      priority={@card[:priority]}
+      lift={@card}
+      density="compact"
+      accent={compact_accent(@column, @card)}
+      draggable="true"
+      class="cursor-pointer"
+      data-card={@card.id}
+      data-column={@column}
+    >
+      <:parent :if={@card[:parent]}>
+        <.parent_link parent={@card.parent} mode="compact" floor={chip_floor(@card)} />
+      </:parent>
+      <:status>
+        <.card_status card={@card} column={@column} now={@now} />
+      </:status>
+      <:chips>
+        <.step_chip
+          :if={@step}
+          card={@card}
+          column={@column}
+          label={@step}
+          hint={@step_hint}
+          href={@step_href}
+        />
+        <.pr_chip :if={@card[:mr_ref]} ref={@card.mr_ref} href={@card[:merger_url]} />
+        <.attention_chip :if={@card[:attention]} attention={@card.attention} />
+        <span
+          :if={@card[:collapsed_note]}
+          data-role="collapsed-note"
+          class="text-[10px] leading-[1.6] font-[family-name:var(--font-mono)] text-[var(--arb-fail-text)]"
+        >
+          {@card.collapsed_note}
+        </span>
+      </:chips>
+    </.task_card>
+    """
+  end
+
+  # One card, any other column. What differs per column is read through the
   # `detail/2`, `activity/2`, `footer/3` and `accent/2` helpers above rather
-  # than seven copies of the markup.
+  # than five copies of the markup.
   defp board_card(assigns) do
     assigns =
       assign(assigns,
@@ -1586,41 +1671,7 @@ defmodule WardmastWeb.BoardLive do
         <.parent_link parent={@card.parent} mode="compact" floor={chip_floor(@card)} />
       </:parent>
       <:status>
-        <span class="flex items-center gap-1.5">
-          <.over_budget_flag :if={@card[:over_budget]} />
-          <.provider_icon
-            :if={@column == "in_progress" and @card[:provider]}
-            provider={@card.provider}
-            class="size-3.5 text-[var(--text-label)]"
-          />
-          <.node_badge :if={@column == "in_progress"} node_name={@card[:node_name]} />
-          <span
-            :if={@column == "in_progress" and @card[:remote_skipped]}
-            data-remote-skipped={@card.remote_skipped}
-            title={@card.remote_skipped}
-            aria-label={@card.remote_skipped}
-            class="inline-flex items-center text-amber-500"
-          >
-            <.icon name="hero-exclamation-triangle-micro" class="size-3.5" />
-          </span>
-          <%!-- bd-aw2cyt: the pulse is a claim that something is running.
-               Only a card with a live agent gets it. --%>
-          <span
-            :if={@column in ["in_progress", "merging", "verifying"]}
-            data-phase={@card[:phase]}
-            data-agent-live={to_string(@card[:agent_live] == true)}
-            class={[
-              "text-[10px] font-medium font-[family-name:var(--font-mono)]",
-              if(@card[:agent_live],
-                do:
-                  "text-[var(--arb-live)] animate-[arb-pulse_var(--pulse-period)_var(--ease-in-out)_infinite]",
-                else: "text-[var(--text-label)] opacity-70"
-              )
-            ]}
-          >
-            {elapsed(@card[:since], @now)}
-          </span>
-        </span>
+        <.card_status card={@card} column={@column} now={@now} />
       </:status>
       <:detail :if={@hold}>
         <.hold_badge card_id={@card.id} column={@column} hold={@hold} />
@@ -1870,6 +1921,214 @@ defmodule WardmastWeb.BoardLive do
     </span>
     """
   end
+
+  attr(:card, :map, required: true)
+  attr(:column, :string, required: true)
+  attr(:now, :any, required: true)
+
+  # The card's top-right corner: budget flag, provider and node (In progress),
+  # and the elapsed time, which pulses only while an agent is live.
+  defp card_status(assigns) do
+    ~H"""
+    <span class="flex items-center gap-1.5">
+      <.over_budget_flag :if={@card[:over_budget]} />
+      <.provider_icon
+        :if={@column == "in_progress" and @card[:provider]}
+        provider={@card.provider}
+        class="size-3.5 text-[var(--text-label)]"
+      />
+      <.node_badge :if={@column == "in_progress"} node_name={@card[:node_name]} />
+      <span
+        :if={@column == "in_progress" and @card[:remote_skipped]}
+        data-remote-skipped={@card.remote_skipped}
+        title={@card.remote_skipped}
+        aria-label={@card.remote_skipped}
+        class="inline-flex items-center text-amber-500"
+      >
+        <.icon name="hero-exclamation-triangle-micro" class="size-3.5" />
+      </span>
+      <%!-- bd-aw2cyt: the pulse is a claim that something is running.
+           Only a card with a live agent gets it. --%>
+      <span
+        :if={@column in ["in_progress", "merging", "verifying"]}
+        data-phase={@card[:phase]}
+        data-agent-live={to_string(@card[:agent_live] == true)}
+        class={[
+          "text-[10px] font-medium font-[family-name:var(--font-mono)]",
+          if(@card[:agent_live],
+            do:
+              "text-[var(--arb-live)] animate-[arb-pulse_var(--pulse-period)_var(--ease-in-out)_infinite]",
+            else: "text-[var(--text-label)] opacity-70"
+          )
+        ]}
+      >
+        {elapsed(@card[:since], @now)}
+      </span>
+    </span>
+    """
+  end
+
+  attr(:card, :map, required: true)
+  attr(:column, :string, required: true)
+  attr(:label, :string, required: true)
+  attr(:hint, :string, default: nil)
+  attr(:href, :string, default: nil)
+
+  # The compact card's step: what the ticket is doing now. Its dot is green
+  # while an agent runs, amber when the operator has to act, grey otherwise.
+  # It links where the next move is made, and its title carries the run's
+  # live activity.
+  defp step_chip(assigns) do
+    assigns = assign(assigns, :tone, step_tone(assigns.card))
+
+    ~H"""
+    <.link
+      :if={@href}
+      navigate={@href}
+      data-detail={@column}
+      data-step={@card[:step]}
+      title={@hint}
+      class={[step_chip_class(@tone), "hover:border-[var(--border-strong)]"]}
+    >
+      <span aria-hidden="true" class={step_dot_class(@tone)} />{@label}
+    </.link>
+    <span
+      :if={!@href}
+      data-detail={@column}
+      data-step={@card[:step]}
+      title={@hint}
+      class={step_chip_class(@tone)}
+    >
+      <span aria-hidden="true" class={step_dot_class(@tone)} />{@label}
+    </span>
+    """
+  end
+
+  defp step_tone(%{attention: %{owner: :operator}}), do: :attention
+  defp step_tone(%{agent_live: true}), do: :live
+  defp step_tone(%{live: true}), do: :live
+  defp step_tone(_card), do: :idle
+
+  defp step_chip_class(tone) do
+    [
+      "inline-flex items-center gap-[5px] max-w-full px-[5px] rounded-[var(--radius-chip)] border border-solid",
+      "text-[10px] leading-[1.6] font-[family-name:var(--font-mono)] truncate",
+      "transition-colors duration-[var(--dur-hover)] ease-[var(--arb-ease-out)]",
+      if(tone == :attention,
+        do:
+          "border-[color-mix(in_oklch,var(--arb-attention)_40%,transparent)] text-[var(--arb-attention)]",
+        else: "border-[var(--border-default)] text-[var(--text-secondary)]"
+      )
+    ]
+  end
+
+  defp step_dot_class(:live), do: "size-[5px] shrink-0 rounded-full bg-[var(--arb-live)]"
+
+  defp step_dot_class(:attention),
+    do: "size-[5px] shrink-0 rounded-full bg-[var(--arb-attention)]"
+
+  defp step_dot_class(_idle), do: "size-[5px] shrink-0 rounded-full bg-[var(--text-label)]"
+
+  attr(:ref, :string, required: true)
+  attr(:href, :string, default: nil)
+
+  # The ticket's PR or MR, short (`#6332`, `!77`), the full ref in its title.
+  # It opens `merger_url`, the forge's own page whichever forge recorded it,
+  # in a new tab; `stopPropagation` keeps the click from also running the
+  # card's own navigation to the ticket.
+  defp pr_chip(assigns) do
+    assigns = assign(assigns, :short, short_pr_ref(assigns.ref))
+
+    ~H"""
+    <a
+      :if={@href}
+      href={@href}
+      target="_blank"
+      rel="noopener noreferrer"
+      onclick="event.stopPropagation()"
+      data-role="pr-link"
+      title={"Open " <> @ref}
+      class={[pr_chip_class(), "hover:underline"]}
+    >
+      {@short}<span
+        aria-hidden="true"
+        class="hero-arrow-top-right-on-square-micro size-2.5 opacity-70"
+      />
+    </a>
+    <span :if={!@href} data-role="pr-link" title={@ref} class={pr_chip_class()}>{@short}</span>
+    """
+  end
+
+  defp pr_chip_class do
+    [
+      "inline-flex items-center gap-[3px] px-[5px] rounded-[var(--radius-chip)] border border-solid",
+      "border-[color-mix(in_oklch,var(--arb-info)_35%,transparent)] bg-[color-mix(in_oklch,var(--arb-info)_8%,transparent)]",
+      "text-[10px] leading-[1.6] font-[family-name:var(--font-mono)] text-[var(--text-link)] whitespace-nowrap"
+    ]
+  end
+
+  # The ref is whatever the workspace's merger adapter recorded, so it is not
+  # assumed to be GitHub's: `owner/repo#6332` reads as `#6332` and GitLab's
+  # `group/project!77` as `!77`. Any other shape is shown whole.
+  defp short_pr_ref(ref) do
+    case Regex.run(~r/[#!]\d+$/, ref) do
+      [short] -> short
+      nil -> ref
+    end
+  end
+
+  attr(:attention, :map, required: true)
+
+  # The compact card's attention: who has to act and, in two or three words,
+  # on what. The full sentence is the chip's title and is read out to screen
+  # readers; the Needs-attention lane shows it in full too.
+  defp attention_chip(assigns) do
+    ~H"""
+    <span
+      data-attention={@attention.owner}
+      title={@attention[:note] || @attention.reason}
+      class={[
+        "inline-flex items-center gap-1 max-w-full px-[5px] rounded-[var(--radius-chip)] border border-solid",
+        "text-[10px] leading-[1.6] font-[family-name:var(--font-mono)] truncate",
+        if(@attention.owner == :operator,
+          do:
+            "border-[color-mix(in_oklch,var(--arb-attention)_45%,transparent)] bg-[color-mix(in_oklch,var(--arb-attention)_10%,transparent)] text-[var(--arb-attention)]",
+          else: "border-[var(--arb-line)] text-[var(--text-secondary)]"
+        )
+      ]}
+    >
+      <span aria-hidden="true" class="hero-flag-micro size-3 shrink-0" />
+      <span class="truncate">
+        <span class="font-medium">{owner_label(@attention.owner)}</span>
+        · {attention_short(@attention)}
+      </span>
+      <span class="sr-only">— {@attention.reason}</span>
+    </span>
+    """
+  end
+
+  @attention_short %{
+    manual_merge: "merge by hand",
+    approval: "approve the PR",
+    answer: "answer a question",
+    resume: "run stopped",
+    review_decision: "review decision",
+    gate_decision: "gate decision",
+    pr_decision: "PR closed",
+    merge_block: "merge blocked",
+    verification: "verify",
+    tracker_sync: "tracker sync",
+    guardrail: "no eligible model",
+    permission_grant: "grant a permission"
+  }
+
+  defp attention_short(%{waiting_on: waiting_on}) when is_atom(waiting_on) and waiting_on != nil,
+    do:
+      Map.get_lazy(@attention_short, waiting_on, fn ->
+        waiting_on |> Atom.to_string() |> String.replace("_", " ")
+      end)
+
+  defp attention_short(attention), do: attention.reason
 
   attr(:label, :string, required: true)
   attr(:count, :any, required: true)

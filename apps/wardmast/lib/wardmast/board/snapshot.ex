@@ -1490,6 +1490,8 @@ defmodule Wardmast.Board.Snapshot do
       status: nil,
       outcome: nil,
       waiting_on: nil,
+      mr_ref: Map.get(issue, :pr_ref),
+      merger_url: Map.get(issue, :merger_url),
       live: false,
       activity: if(dispatching?, do: @dispatching_state, else: orphan_reason(issue)),
       provider: nil,
@@ -1864,7 +1866,11 @@ defmodule Wardmast.Board.Snapshot do
       # what a waiting run waits on ride alongside.
       status: Map.get(worker, :state),
       outcome: Map.get(worker, :outcome),
-      waiting_on: Map.get(worker, :waiting_on)
+      waiting_on: Map.get(worker, :waiting_on),
+      # The PR a run already opened (a fix or conflict pass runs on an open
+      # one), so an In progress card can link it the way a Merging card does.
+      mr_ref: issue && Map.get(issue, :pr_ref),
+      merger_url: issue && Map.get(issue, :merger_url)
     }
   end
 
