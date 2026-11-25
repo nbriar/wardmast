@@ -15,6 +15,10 @@ defmodule Wardmast.Tasks.Issue.Changes.Transition do
   commit — the ticket's open escalations (`Changes.ClearAttention`). An action that raises its own cause declares
   that change after this one.
 
+  It also takes the ticket off the board's shelf (`shelved_at` and the rest):
+  a parked Merging ticket that merges, closes or goes back to work is no
+  longer parked. A transition that leaves the state where it was keeps it.
+
   The state history (bd-5gkqdr) is not written here: a trigger on `issues`
   appends the `Wardmast.Tasks.TicketTransition` row inside the state write's own
   statement, because AshSqlite opens no transaction this change could share. A
@@ -67,7 +71,15 @@ defmodule Wardmast.Tasks.Issue.Changes.Transition do
     |> Changeset.force_change_attribute(:close_reason, close_reason(changeset, to))
     |> clear_pin(transition)
     |> ClearAttention.clear()
+    |> clear_shelf(changeset.data.state, to)
   end
+
+  # A move out of the state the ticket was parked in takes it off the shelf;
+  # a transition that leaves it `:merging` keeps it parked.
+  defp clear_shelf(changeset, same, same), do: changeset
+
+  defp clear_shelf(changeset, _from, _to),
+    do: Changeset.force_change_attributes(changeset, Wardmast.Tasks.Issue.shelf_cleared())
 
   # ES6: a drag pins a card in the column it was dragged in. A promote, demote,
   # close or reopen moves it somewhere its old manual position means nothing,

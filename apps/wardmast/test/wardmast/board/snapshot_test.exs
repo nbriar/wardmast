@@ -1752,4 +1752,89 @@ defmodule Wardmast.Board.SnapshotTest do
              }
     end
   end
+
+  describe "the board shelf (parked Merging tickets)" do
+    defp parked(id, attrs) do
+      issue(
+        id,
+        Map.merge(
+          %{
+            state: :merging,
+            pr_ref: "!7",
+            attention_cause: :awaiting_manual_merge,
+            shelved_at: @yesterday,
+            shelved_reason: :discussion,
+            shelved_note: "waiting on Sam"
+          },
+          attrs
+        )
+      )
+    end
+
+    test "a parked ticket leaves Merging and Needs attention and is listed under shelved" do
+      board =
+        derive(
+          issues: [
+            parked("bd-p", %{}),
+            issue("bd-m", %{state: :merging, pr_ref: "!8", attention_cause: :awaiting_manual_merge})
+          ]
+        )
+
+      assert Enum.map(board.merging, & &1.id) == ["bd-m"]
+      assert Enum.map(board.attention, & &1.id) == ["bd-m"]
+
+      assert [
+               %{
+                 id: "bd-p",
+                 mr_ref: "!7",
+                 shelf: %{reason: :discussion, note: "waiting on Sam", until: nil}
+               }
+             ] = board.shelved
+    end
+
+    test "a return date that has passed reads as not parked" do
+      board = derive(issues: [parked("bd-p", %{shelved_until: @yesterday})])
+
+      assert Enum.map(board.merging, & &1.id) == ["bd-p"]
+      assert board.shelved == []
+    end
+
+    test "a return date still ahead keeps it parked" do
+      board = derive(issues: [parked("bd-p", %{shelved_until: DateTime.add(@now, 1, :day)})])
+
+      assert board.merging == []
+      assert [%{id: "bd-p"}] = board.shelved
+    end
+
+    test "the shelf only applies while the ticket is Merging" do
+      board = derive(issues: [parked("bd-v", %{state: :verifying})])
+
+      assert board.shelved == []
+      assert [%{id: "bd-v"}] = board.verifying
+    end
+
+    test "an empty board has an empty shelf" do
+      assert Snapshot.empty(@now).shelved == []
+      assert derive(issues: []).shelved == []
+    end
+  end
+
+  describe "the over-budget marker's spend" do
+    test "a spend map puts the figure on the card beside the flag" do
+      board =
+        derive(
+          issues: [issue("bd-a", %{state: :merging, pr_ref: "!1"})],
+          over_budget: %{"bd-a" => 41.2}
+        )
+
+      assert [%{over_budget: true, over_budget_usd: 41.2}] = board.merging
+    end
+
+    test "ids alone flag the card with no figure" do
+      board =
+        derive(issues: [issue("bd-a", %{state: :merging, pr_ref: "!1"})], over_budget: ["bd-a"])
+
+      assert [%{over_budget: true, over_budget_usd: nil}] = board.merging
+    end
+  end
 end

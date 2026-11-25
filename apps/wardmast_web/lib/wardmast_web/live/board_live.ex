@@ -55,6 +55,20 @@ defmodule WardmastWeb.BoardLive do
   pushes back. With no storage (private mode, a blocked `localStorage`) the
   lane simply starts open, operator-only.
 
+  Each lane item is one compact row (id, title, short reason, age); the lane
+  shows five, then "N more". Budget overruns (`:budget_exceeded`) never reach
+  the lane: budgets don't hold work back, so the card's own grey banknote
+  marker, with the spend so far, is the only place they show.
+
+  ## Parking
+
+  A Merging ticket can be parked ("deal with later", "waiting on
+  discussion"), from its lane row or its card: the `:shelve` action, with an
+  optional note and return date. A parked ticket leaves the Merging column
+  and Needs attention, and is listed under the lane's **Parked** tab (shown
+  only while something is parked) until it is unparked, its return date
+  passes or its state moves on. Its PR is untouched.
+
   ## Manual order
 
   Backlog and Ready sort by priority, then the persisted `rank`
@@ -184,6 +198,9 @@ defmodule WardmastWeb.BoardLive do
       |> assign(:local_cap_zero?, false)
       |> assign(:lane_open, true)
       |> assign(:lane_coordinator, false)
+      |> assign(:lane_tab, "attention")
+      |> assign(:lane_show_all, false)
+      |> assign(:shelve_target, nil)
       |> assign(:scheduler_running, false)
       |> assign(:explain, empty_explain())
       |> assign(:capacity, nil)
@@ -291,8 +308,17 @@ defmodule WardmastWeb.BoardLive do
 
   # ---- the Needs-attention swimlane ------------------------------------------
 
-  def handle_event("toggle_attention_lane", _params, socket),
-    do: {:noreply, socket |> update(:lane_open, &(not &1)) |> push_lane_pref()}
+  # On the Parked tab, the Needs-attention heading switches back to it rather
+  # than collapsing the lane.
+  def handle_event("toggle_attention_lane", _params, socket) do
+    parked? = Map.get(socket.assigns.board, :shelved, []) != []
+
+    if socket.assigns.lane_tab == "parked" and parked? do
+      {:noreply, assign(socket, lane_tab: "attention", lane_open: true)}
+    else
+      {:noreply, socket |> update(:lane_open, &(not &1)) |> push_lane_pref()}
+    end
+  end
 
   def handle_event("toggle_attention_coordinator", _params, socket),
     do: {:noreply, socket |> update(:lane_coordinator, &(not &1)) |> push_lane_pref()}
@@ -305,6 +331,59 @@ defmodule WardmastWeb.BoardLive do
      socket
      |> restore_lane(:lane_open, Map.get(params, "open"))
      |> restore_lane(:lane_coordinator, Map.get(params, "coordinator"))}
+  end
+
+  def handle_event("lane_tab", %{"tab" => tab}, socket) when tab in ["attention", "parked"],
+    do: {:noreply, assign(socket, lane_tab: tab, lane_open: true)}
+
+  def handle_event("lane_show_all", _params, socket),
+    do: {:noreply, assign(socket, :lane_show_all, true)}
+
+  # ---- parking a Merging ticket ---------------------------------------------
+  #
+  # "Park" on the board is the `:shelve` action: the ticket stays Merging with
+  # its PR open, and leaves the Merging column and Needs attention until it is
+  # unparked, its return date passes or its state moves on. The form opens
+  # from a lane row or a Merging card.
+
+  def handle_event("open_shelve", %{"id" => id}, socket) do
+    target =
+      Enum.find(socket.assigns.board.merging, &(&1.id == id)) ||
+        Enum.find(socket.assigns.board.attention, &(&1.id == id))
+
+    shelve_target = target && %{id: target.id, title: target[:title]}
+    {:noreply, assign(socket, :shelve_target, shelve_target)}
+  end
+
+  def handle_event("close_shelve", _params, socket),
+    do: {:noreply, assign(socket, :shelve_target, nil)}
+
+  def handle_event("shelve", %{"shelve" => %{"id" => id} = params}, socket) do
+    attrs = %{
+      reason: shelve_reason(params["reason"]),
+      note: params["note"],
+      until: shelve_until(params["back"])
+    }
+
+    with {:ok, issue} <- Ash.get(Issue, id),
+         {:ok, _shelved} <- Ash.update(issue, attrs, action: :shelve) do
+      {:noreply,
+       socket
+       |> assign(:shelve_target, nil)
+       |> put_flash(:info, "Parked #{id}. It's under Parked until you bring it back.")
+       |> refresh_board()}
+    else
+      {:error, err} -> {:noreply, put_flash(socket, :error, error_message(err))}
+    end
+  end
+
+  def handle_event("unshelve", %{"id" => id}, socket) do
+    with {:ok, issue} <- Ash.get(Issue, id),
+         {:ok, _back} <- Ash.update(issue, %{}, action: :unshelve) do
+      {:noreply, socket |> put_flash(:info, "#{id} is back in Merging.") |> refresh_board()}
+    else
+      {:error, err} -> {:noreply, put_flash(socket, :error, error_message(err))}
+    end
   end
 
   # ---- refine (bd-1lszsc) ---------------------------------------------------
@@ -825,12 +904,54 @@ defmodule WardmastWeb.BoardLive do
     |> Enum.filter(&(lane_owner?(&1.owner, assigns) and matches?(&1, assigns)))
   end
 
+  # Budget overruns stay off the lane: budgets don't hold work back, so an
+  # overrun is shown quietly on the ticket's own card instead.
+  @quiet_alert_kinds [:budget_exceeded]
+
   defp lane_alerts(assigns) do
-    Enum.filter(assigns.alerts, fn alert ->
+    assigns.alerts
+    |> Enum.reject(&(&1.kind in @quiet_alert_kinds))
+    |> Enum.filter(fn alert ->
       lane_owner?(alert.owner, assigns) and
         (is_nil(alert.workspace_id) or matches_workspace?(alert, assigns.workspace))
     end)
   end
+
+  # The parked Merging tickets (`Snapshot` `:shelved`), under the same filter.
+  defp lane_shelved(assigns) do
+    assigns.board |> Map.get(:shelved, []) |> Enum.filter(&matches?(&1, assigns))
+  end
+
+  # The lane shows a handful of rows — alerts first — then "N more". A Parked
+  # tab with nothing left on it falls back to Needs attention.
+  @lane_rows 5
+
+  defp assign_lane_limits(assigns) do
+    alerts = length(assigns.lane_alerts)
+    tickets = length(assigns.lane_tickets)
+
+    {alert_limit, ticket_limit} =
+      if assigns.lane_show_all,
+        do: {alerts, tickets},
+        else: {min(alerts, @lane_rows), max(@lane_rows - alerts, 0)}
+
+    tab = if assigns.lane_shelved == [], do: "attention", else: assigns.lane_tab
+
+    assign(assigns,
+      lane_tab: tab,
+      lane_alert_limit: alert_limit,
+      lane_ticket_limit: ticket_limit,
+      lane_hidden: max(alerts - alert_limit, 0) + max(tickets - ticket_limit, 0)
+    )
+  end
+
+  defp shelve_reason("discussion"), do: :discussion
+  defp shelve_reason(_), do: :later
+
+  defp shelve_until(days) when days in ["1", "7"],
+    do: DateTime.add(DateTime.utc_now(), String.to_integer(days), :day)
+
+  defp shelve_until(_), do: nil
 
   defp lane_owner?(:operator, _assigns), do: true
   defp lane_owner?(_owner, assigns), do: assigns.lane_coordinator
@@ -905,17 +1026,70 @@ defmodule WardmastWeb.BoardLive do
   # like this one cost. A flag, not a hue — the card's accent belongs to the
   # state that owns it right now, and money is a second axis. Open cards only:
   # `Snapshot.derive/1` never sets it on a closed one.
+  #
+  # Quiet on purpose: budgets don't hold work back, so this is grey, shows the
+  # spend so far when it is known, and never reaches the Needs-attention lane.
+  attr(:usd, :any, default: nil)
+
   defp over_budget_flag(assigns) do
     ~H"""
     <span
       data-over-budget
-      title="worker spend is past the p90 of what tickets like this cost — excludes coordinator session overhead"
-      aria-label="over budget"
-      class="hero-banknotes"
-      style="width: 11px; height: 11px; background-color: var(--arb-fail);"
-    />
+      title={over_budget_title(@usd)}
+      aria-label={"over budget" <> if(@usd, do: ": #{money(@usd)} spent", else: "")}
+      class="inline-flex items-center gap-0.5 text-[10px] font-medium font-[family-name:var(--font-mono)] text-[var(--text-label)]"
+    >
+      <span aria-hidden="true" class="hero-banknotes-micro size-3" />
+      <span :if={@usd}>{money_short(@usd)}</span>
+    </span>
     """
   end
+
+  defp over_budget_title(usd) do
+    spent = if usd, do: "worker spend #{money(usd)}, ", else: "worker spend is "
+
+    spent <>
+      "past the p90 of what tickets like this cost (excludes coordinator session overhead)"
+  end
+
+  defp money(usd), do: "$" <> :erlang.float_to_binary(usd / 1, decimals: 2)
+  defp money_short(usd), do: "$" <> Integer.to_string(round(usd))
+
+  # ---- the lane's rows ---------------------------------------------------------
+
+  # One 26px row per lane item: icon, id, title, reason, age, action.
+  defp lane_row_class,
+    do: [
+      "grid grid-cols-[14px_minmax(4rem,6.5rem)_minmax(0,1fr)_auto_3.5rem_20px] items-center gap-x-2",
+      "h-[26px] border-t border-solid border-[var(--arb-line-soft)] first:border-t-0"
+    ]
+
+  attr(:id, :string, required: true)
+  attr(:scope, :string, default: "board", doc: "DOM id prefix: the card's or the lane row's")
+
+  # Park a Merging ticket: opens the board's park form for it.
+  defp park_button(assigns) do
+    ~H"""
+    <button
+      id={"#{@scope}-park-#{@id}"}
+      type="button"
+      phx-click="open_shelve"
+      phx-value-id={@id}
+      title="Park: set aside to deal with later"
+      aria-label={"Park #{@id}"}
+      data-park={@id}
+      class="inline-grid place-items-center size-5 rounded-[var(--radius-chip)] cursor-pointer text-[var(--text-label)] hover:text-[var(--arb-proposal)] hover:bg-[var(--arb-canvas-sunken)] transition-colors"
+    >
+      <span aria-hidden="true" class="hero-pause-circle-micro size-3.5" />
+    </button>
+    """
+  end
+
+  defp shelf_reason_label(:discussion), do: "waiting on discussion"
+  defp shelf_reason_label(_), do: "deal with later"
+
+  defp shelf_back_label(%DateTime{} = until), do: "back " <> Calendar.strftime(until, "%b %-d")
+  defp shelf_back_label(_), do: ""
 
   defp board_state(_loaded?, error) when is_binary(error), do: "error"
   defp board_state(true, nil), do: "loaded"
@@ -1045,6 +1219,8 @@ defmodule WardmastWeb.BoardLive do
       |> assign(:items, Map.new(@columns, &{&1.key, column_items(assigns, &1)}))
       |> assign(:lane_tickets, lane_tickets(assigns))
       |> assign(:lane_alerts, lane_alerts(assigns))
+      |> assign(:lane_shelved, lane_shelved(assigns))
+      |> assign_lane_limits()
 
     ~H"""
     <Layouts.app
@@ -1212,14 +1388,16 @@ defmodule WardmastWeb.BoardLive do
             </button>
           </div>
 
-          <%!-- ── Needs attention ─────────────────────────────────────
+          <%!-- ── Needs attention / Parked ────────────────────────────
                Always in the DOM, so its hook can restore the viewer's own
-               setting before the first board read lands. --%>
+               setting before the first board read lands. One compact row per
+               item; the Parked tab lists the Merging tickets set aside. --%>
           <section
             id="board-attention-lane"
             phx-hook=".AttentionLane"
             aria-label="Needs attention"
             data-open={to_string(@lane_open)}
+            data-tab={@lane_tab}
             class="border-b border-solid border-[var(--border-default)] bg-[var(--surface-page)]"
           >
             <div class="flex flex-wrap items-center gap-2 px-4 py-2">
@@ -1229,7 +1407,13 @@ defmodule WardmastWeb.BoardLive do
                 phx-click="toggle_attention_lane"
                 aria-expanded={to_string(@lane_open)}
                 aria-controls="board-attention-items"
-                class="group inline-flex items-center gap-1.5 cursor-pointer text-[10.5px] font-medium uppercase tracking-[0.1em] font-[family-name:var(--font-mono)] text-[var(--text-secondary)] hover:text-[var(--text-title)] transition-colors"
+                class={[
+                  "group inline-flex items-center gap-1.5 cursor-pointer text-[10.5px] font-medium uppercase tracking-[0.1em] font-[family-name:var(--font-mono)] hover:text-[var(--text-title)] transition-colors",
+                  if(@lane_tab == "parked",
+                    do: "text-[var(--text-label)]",
+                    else: "text-[var(--text-secondary)]"
+                  )
+                ]}
               >
                 <span
                   aria-hidden="true"
@@ -1253,7 +1437,40 @@ defmodule WardmastWeb.BoardLive do
                 </span>
               </button>
 
+              <%!-- Shown only while something is parked. --%>
+              <span
+                :if={@lane_shelved != []}
+                aria-hidden="true"
+                class="w-px h-3.5 bg-[var(--border-default)]"
+              />
               <button
+                :if={@lane_shelved != []}
+                id="board-parked-tab"
+                type="button"
+                phx-click="lane_tab"
+                phx-value-tab="parked"
+                aria-pressed={to_string(@lane_tab == "parked")}
+                aria-controls="board-attention-items"
+                title="Merging tickets set aside to deal with later"
+                class={[
+                  "inline-flex items-center gap-1.5 cursor-pointer text-[10.5px] font-medium uppercase tracking-[0.1em] font-[family-name:var(--font-mono)] hover:text-[var(--text-title)] transition-colors",
+                  if(@lane_tab == "parked",
+                    do: "text-[var(--text-secondary)]",
+                    else: "text-[var(--text-label)]"
+                  )
+                ]}
+              >
+                <span aria-hidden="true" class="hero-pause-circle-micro size-3.5" /> Parked
+                <span
+                  id="board-parked-count"
+                  class="min-w-[18px] px-1.5 py-px rounded-[var(--radius-pill)] text-center normal-case tracking-normal bg-[color-mix(in_oklch,var(--arb-proposal)_16%,transparent)] text-[var(--arb-proposal)]"
+                >
+                  {length(@lane_shelved)}
+                </span>
+              </button>
+
+              <button
+                :if={@lane_tab == "attention"}
                 id="board-attention-coordinator"
                 type="button"
                 phx-click="toggle_attention_coordinator"
@@ -1274,66 +1491,162 @@ defmodule WardmastWeb.BoardLive do
               </button>
             </div>
 
+            <%!-- The park form: opened from a lane row or a Merging card. --%>
+            <.form
+              :if={@shelve_target}
+              for={%{}}
+              as={:shelve}
+              id="board-shelve-form"
+              phx-submit="shelve"
+              class="mx-4 mb-2 flex flex-wrap items-end gap-2 px-3 py-2 rounded-[var(--radius-field)] border border-solid border-[color-mix(in_oklch,var(--arb-proposal)_40%,transparent)] bg-[var(--surface-card)]"
+            >
+              <input type="hidden" name="shelve[id]" value={@shelve_target.id} />
+              <span class="basis-full flex items-center gap-1.5 text-[11px] font-[family-name:var(--font-mono)] text-[var(--text-secondary)] min-w-0">
+                <span
+                  aria-hidden="true"
+                  class="hero-pause-circle-micro size-3.5 shrink-0 text-[var(--arb-proposal)]"
+                /> Park {@shelve_target.id}
+                <span class="truncate text-[var(--text-label)]">· {@shelve_target.title}</span>
+              </span>
+              <WardmastWeb.CoreComponents.Forms.select
+                id="board-shelve-reason"
+                name="shelve[reason]"
+                label="Why"
+                options={[{"Deal with later", "later"}, {"Waiting on discussion", "discussion"}]}
+                value="later"
+                size="sm"
+                mono={false}
+                class="w-48"
+              />
+              <WardmastWeb.CoreComponents.Forms.select
+                id="board-shelve-back"
+                name="shelve[back]"
+                label="Bring it back"
+                options={[{"Never", ""}, {"Tomorrow", "1"}, {"In 1 week", "7"}]}
+                value=""
+                size="sm"
+                mono={false}
+                class="w-36"
+              />
+              <div class="grow min-w-[12rem]">
+                <WardmastWeb.CoreComponents.Forms.input
+                  id="board-shelve-note"
+                  name="shelve[note]"
+                  label="Note (optional)"
+                  placeholder="What or who it is waiting on"
+                  value=""
+                  size="sm"
+                  mono={false}
+                />
+              </div>
+              <span class="flex gap-1.5">
+                <WardmastWeb.CoreComponents.Core.button
+                  id="board-shelve-submit"
+                  type="submit"
+                  variant="primary"
+                  size="sm"
+                >
+                  Park
+                </WardmastWeb.CoreComponents.Core.button>
+                <WardmastWeb.CoreComponents.Core.button
+                  id="board-shelve-cancel"
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  phx-click="close_shelve"
+                >
+                  Cancel
+                </WardmastWeb.CoreComponents.Core.button>
+              </span>
+            </.form>
+
             <div
-              :if={@lane_open and @board_loaded?}
+              :if={@lane_open and @board_loaded? and @lane_tab == "attention"}
               id="board-attention-items"
-              class="flex gap-2 overflow-x-auto px-4 pb-3"
+              class="flex flex-col px-4 pb-2"
             >
               <div
-                :for={alert <- @lane_alerts}
+                :for={alert <- Enum.take(@lane_alerts, @lane_alert_limit)}
                 id={"lane-alert-#{alert.id}"}
                 data-lane-item="alert"
                 data-owner={alert.owner}
-                class="flex-none w-64 flex flex-col gap-1 px-[11px] py-[9px] rounded-[var(--radius-field)] border border-solid border-[var(--arb-fail-edge)] bg-[var(--arb-fail-wash)]"
+                title={alert.detail}
+                class={lane_row_class()}
               >
-                <span class="flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-[0.08em] font-[family-name:var(--font-mono)] text-[var(--arb-fail-text)]">
-                  <span aria-hidden="true" class="hero-bell-alert-micro size-3.5" />
+                <span aria-hidden="true" class="hero-bell-alert-micro size-3.5 text-[var(--arb-fail-text)]" />
+                <span class="text-[10px] font-[family-name:var(--font-mono)] text-[var(--text-label)] truncate">
                   {alert_kind_label(alert.kind)}
-                  <span class="ml-auto normal-case tracking-normal text-[var(--text-label)]">
-                    {elapsed(alert.raised_at, @now)}
-                  </span>
                 </span>
-                <span class="text-[12px] font-medium leading-[1.4] text-[var(--text-title)]">
+                <span class="truncate text-[12px] font-medium text-[var(--text-title)]">
                   {alert.subject || alert.key}
                 </span>
-                <span
-                  :if={alert.detail}
-                  class="text-[11px] leading-[1.45] text-[var(--text-secondary)] line-clamp-2"
-                  title={alert.detail}
-                >
-                  {alert.detail}
+                <span class="text-[10px] font-[family-name:var(--font-mono)] text-[var(--arb-fail-text)] whitespace-nowrap">
+                  system
                 </span>
+                <span class="text-right text-[10px] font-[family-name:var(--font-mono)] text-[var(--text-label)] whitespace-nowrap">
+                  {elapsed(alert.raised_at, @now)}
+                </span>
+                <span />
               </div>
 
-              <.link
-                :for={item <- @lane_tickets}
-                id={"lane-ticket-#{item.id}"}
-                navigate={~p"/tasks/#{item.id}"}
+              <div
+                :for={item <- Enum.take(@lane_tickets, @lane_ticket_limit)}
+                id={"lane-row-#{item.id}"}
                 data-lane-item="ticket"
                 data-owner={item.owner}
-                class={[
-                  "flex-none w-64 flex flex-col gap-1 px-[11px] py-[9px]",
-                  "rounded-[var(--radius-field)] border border-solid bg-[var(--surface-card)]",
-                  "transition-colors duration-[var(--dur-hover)] hover:bg-[var(--arb-canvas-sunken)]",
-                  "no-underline text-inherit",
-                  if(item.owner == :operator,
-                    do: "border-[color-mix(in_oklch,var(--arb-attention)_45%,transparent)]",
-                    else: "border-[var(--arb-line)]"
-                  )
-                ]}
+                class={lane_row_class()}
               >
-                <span class="flex items-center gap-1.5 text-[10.5px] font-[family-name:var(--font-mono)]">
-                  <span class="font-medium text-[var(--text-secondary)]">{item.id}</span>
-                  <span class="text-[var(--text-label)]">
-                    · {column_label(Atom.to_string(item.column))}
+                <span
+                  aria-hidden="true"
+                  class={[
+                    "hero-flag-micro size-3.5",
+                    if(item.owner == :operator,
+                      do: "text-[var(--arb-attention)]",
+                      else: "text-[var(--arb-info)]"
+                    )
+                  ]}
+                />
+                <.link
+                  id={"lane-ticket-#{item.id}"}
+                  navigate={~p"/tasks/#{item.id}"}
+                  title={item[:note] || item.reason}
+                  class="col-span-4 grid grid-cols-subgrid items-center min-w-0 no-underline text-inherit"
+                >
+                  <span class="text-[10px] font-[family-name:var(--font-mono)] text-[var(--text-secondary)] truncate">
+                    {item.id}
                   </span>
-                  <span class="ml-auto text-[var(--text-label)]">{elapsed(item.since, @now)}</span>
-                </span>
-                <span class="text-[12px] font-medium leading-[1.4] text-[var(--text-title)] line-clamp-2">
-                  {item.title || item.id}
-                </span>
-                <.attention_marker attention={item} />
-              </.link>
+                  <span class="truncate text-[12px] font-medium text-[var(--text-title)]">
+                    {item.title || item.id}
+                  </span>
+                  <span
+                    data-attention={item.owner}
+                    class={[
+                      "text-[10px] font-[family-name:var(--font-mono)] whitespace-nowrap",
+                      if(item.owner == :operator,
+                        do: "text-[var(--arb-attention)]",
+                        else: "text-[var(--arb-info)]"
+                      )
+                    ]}
+                  >
+                    {if item.owner == :operator, do: "", else: "coordinator · "}{attention_short(item)}
+                  </span>
+                  <span class="text-right text-[10px] font-[family-name:var(--font-mono)] text-[var(--text-label)] whitespace-nowrap">
+                    {elapsed(item.since, @now)}
+                  </span>
+                </.link>
+                <.park_button :if={item.column == :merging} id={item.id} scope="lane" />
+                <span :if={item.column != :merging} />
+              </div>
+
+              <button
+                :if={@lane_hidden > 0}
+                id="board-attention-more"
+                type="button"
+                phx-click="lane_show_all"
+                class="self-start mt-1 px-1 text-[10.5px] font-[family-name:var(--font-mono)] text-[var(--text-label)] hover:text-[var(--text-secondary)] cursor-pointer"
+              >
+                {@lane_hidden} more
+              </button>
 
               <div
                 :if={@lane_tickets == [] and @lane_alerts == []}
@@ -1343,6 +1656,64 @@ defmodule WardmastWeb.BoardLive do
                 {if @lane_coordinator,
                   do: "nothing needs attention",
                   else: "nothing needs you — the coordinator has the rest"}
+              </div>
+            </div>
+
+            <div
+              :if={@lane_open and @board_loaded? and @lane_tab == "parked"}
+              id="board-parked-items"
+              class="flex flex-col px-4 pb-2"
+            >
+              <div
+                :for={card <- @lane_shelved}
+                id={"parked-row-#{card.id}"}
+                data-lane-item="parked"
+                data-shelf-reason={card.shelf.reason}
+                class={lane_row_class()}
+              >
+                <span
+                  aria-hidden="true"
+                  class={[
+                    if(card.shelf.reason == :discussion,
+                      do: "hero-chat-bubble-left-micro",
+                      else: "hero-clock-micro"
+                    ),
+                    "size-3.5 text-[var(--arb-proposal)]"
+                  ]}
+                />
+                <.link
+                  id={"parked-ticket-#{card.id}"}
+                  navigate={~p"/tasks/#{card.id}"}
+                  title={card.shelf.note}
+                  class="col-span-4 grid grid-cols-subgrid items-center min-w-0 no-underline text-inherit"
+                >
+                  <span class="text-[10px] font-[family-name:var(--font-mono)] text-[var(--text-secondary)] truncate">
+                    {card.id}
+                  </span>
+                  <span class="truncate text-[12px] font-medium text-[var(--text-title)]">
+                    {card.title || card.id}<span
+                      :if={card.shelf.note}
+                      class="ml-2 font-normal text-[11px] text-[var(--text-label)]"
+                    >{card.shelf.note}</span>
+                  </span>
+                  <span class="text-[10px] font-[family-name:var(--font-mono)] text-[var(--arb-proposal)] whitespace-nowrap">
+                    {shelf_reason_label(card.shelf.reason)}
+                  </span>
+                  <span class="text-right text-[10px] font-[family-name:var(--font-mono)] text-[var(--text-label)] whitespace-nowrap">
+                    {shelf_back_label(card.shelf.until)}
+                  </span>
+                </.link>
+                <button
+                  id={"board-unpark-#{card.id}"}
+                  type="button"
+                  phx-click="unshelve"
+                  phx-value-id={card.id}
+                  title="Unpark: back to Merging"
+                  aria-label={"Unpark #{card.id}"}
+                  class="inline-grid place-items-center size-5 rounded-[var(--radius-chip)] cursor-pointer text-[var(--text-label)] hover:text-[var(--arb-attention)] hover:bg-[var(--arb-canvas-sunken)] transition-colors"
+                >
+                  <span aria-hidden="true" class="hero-arrow-uturn-left-micro size-3.5" />
+                </button>
               </div>
             </div>
           </section>
@@ -1623,6 +1994,7 @@ defmodule WardmastWeb.BoardLive do
         />
         <.pr_chip :if={@card[:mr_ref]} ref={@card.mr_ref} href={@card[:merger_url]} />
         <.attention_chip :if={@card[:attention]} attention={@card.attention} />
+        <.park_button :if={@column == "merging"} id={@card.id} />
         <span
           :if={@card[:collapsed_note]}
           data-role="collapsed-note"
@@ -1931,7 +2303,7 @@ defmodule WardmastWeb.BoardLive do
   defp card_status(assigns) do
     ~H"""
     <span class="flex items-center gap-1.5">
-      <.over_budget_flag :if={@card[:over_budget]} />
+      <.over_budget_flag :if={@card[:over_budget]} usd={@card[:over_budget_usd]} />
       <.provider_icon
         :if={@column == "in_progress" and @card[:provider]}
         provider={@card.provider}
