@@ -55,3 +55,7 @@ config :phoenix, :stacktrace_depth, 20
 # scheduler is what fills that cache, so the dogfooded dev coordinator needs it on too.
 # `WARDMAST_CLI_FETCHER=0` still turns it off; `mix wardmast.fetch_clis` fills the cache by hand.
 config :wardmast, :cli_fetcher, enabled: true
+
+# Local: the coordinator runs in dev on ai-worker; debug logging (every Ecto query)
+# flooded the journal and cost about a quarter of a core.
+config :logger, level: :warning
