@@ -470,6 +470,7 @@ defmodule WardmastWeb.BoardLiveTest do
       {:ok, view, _html} = live_board(conn)
 
       assert has_element?(view, ~s([id="card-#{task.id}"] a[href="/merge_queue"]))
+      assert has_element?(view, ~s([id="card-#{task.id}"] [data-role="pr-link"]), "!77")
     end
 
     test "a parked worker awaiting an answer points the chip at the worker page", %{
@@ -691,16 +692,54 @@ defmodule WardmastWeb.BoardLiveTest do
   end
 
   describe "In progress column rendering" do
-    test "displays difficulty on running cards", %{conn: conn, ws: ws} do
+    # The compact status row: once work is running, difficulty says little
+    # and the card leaves it to the ticket page. Ready still shows it.
+    test "leaves difficulty off running cards", %{conn: conn, ws: ws} do
       task = issue(ws, "work with difficulty", %{difficulty: 2})
+      queued = issue(ws, "queued with difficulty", %{difficulty: 3})
+      {:ok, _pid} = Worker.start(task_id: task.id, repo: "r", workspace_id: ws.id)
+
+      {:ok, view, _html} = live_board(conn)
+
+      assert has_element?(view, ~s(#board-column-in_progress [id="card-#{task.id}"]))
+
+      refute has_element?(
+               view,
+               ~s(#board-column-in_progress [id="card-#{task.id}"] [aria-label="Difficulty D2"])
+             )
+
+      assert has_element?(view, ~s([id="card-#{queued.id}"] [aria-label="Difficulty D3"]))
+    end
+
+    test "links the PR an In progress ticket already has", %{conn: conn, ws: ws} do
+      task = working_issue(ws, "pre-review PR open")
+
+      {:ok, _} =
+        Ash.update(
+          task,
+          %{pr_ref: "acme/app#41", merger_url: "https://github.com/acme/app/pull/41"},
+          action: :record_pr
+        )
+
       {:ok, _pid} = Worker.start(task_id: task.id, repo: "r", workspace_id: ws.id)
 
       {:ok, view, _html} = live_board(conn)
 
       assert has_element?(
                view,
-               ~s(#board-column-in_progress [id="card-#{task.id}"] [aria-label="Difficulty D2"])
+               ~s(#board-column-in_progress [id="card-#{task.id}"] a[data-role="pr-link"][href="https://github.com/acme/app/pull/41"][target="_blank"]),
+               "#41"
              )
+    end
+
+    test "shows no PR chip before a PR exists", %{conn: conn, ws: ws} do
+      task = issue(ws, "no PR yet")
+      {:ok, _pid} = Worker.start(task_id: task.id, repo: "r", workspace_id: ws.id)
+
+      {:ok, view, _html} = live_board(conn)
+
+      assert has_element?(view, ~s(#board-column-in_progress [id="card-#{task.id}"]))
+      refute has_element?(view, ~s([id="card-#{task.id}"] [data-role="pr-link"]))
     end
 
     test "does not crash when difficulty is not set", %{conn: conn, ws: ws} do

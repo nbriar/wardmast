@@ -140,6 +140,33 @@ defmodule WardmastWeb.CoreComponents.DomainTest do
       end
     end
 
+    test "compact density puts priority and the chips in one row and drops the meta row" do
+      assigns = %{}
+
+      html =
+        rendered_to_string(~H"""
+        <WardmastWeb.CoreComponents.Domain.task_card
+          id="bd-1"
+          title="t"
+          priority={2}
+          difficulty={3}
+          activity="edit · status_helpers.ex"
+          footer="w-14"
+          density="compact"
+        >
+          <:chips><span>step-chip</span></:chips>
+        </WardmastWeb.CoreComponents.Domain.task_card>
+        """)
+
+      assert html =~ ~s(data-density="compact")
+      assert html =~ "line-clamp-2"
+      assert html =~ "P2"
+      assert html =~ "step-chip"
+      refute html =~ "Difficulty D3"
+      refute html =~ "edit · status_helpers.ex"
+      refute html =~ "w-14"
+    end
+
     test "accent=done and no accent paint no left rule — done is not a hue" do
       refute render_component(&task_card/1, id: "bd-1", title: "t", accent: "done") =~
                "border-l-["
